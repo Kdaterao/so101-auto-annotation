@@ -7,8 +7,8 @@ import unittest
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
-from grounded_validation import (EpisodeShapeError, validate_episode_shapes,
-                                validate_stat_value, record_skipped_episode)
+from robot101.data.utilities.validation import (EpisodeShapeError, validate_episode_shapes,
+                                                validate_stat_value, record_skipped_episode)
 
 
 class ShapeTests(unittest.TestCase):

@@ -109,7 +109,7 @@ On each VM after its assignment:
 
 ```bash
 export ANNOTATION_REPO="kdaterao/so101_spread73_v1_annotations_vm${WORKER}"
-export GROUNDING_REPO="kdaterao/so101_spread73_v2_grounded_vm${WORKER}"
+export GROUNDING_REPO="kdaterao/so101_spread73_v3_grounded_vm${WORKER}"
 ```
 
 All third-person goals now use stationary endpoint coordinates, including
@@ -131,6 +131,7 @@ python -m robot101.data.preprocess \
   --annotation-stage captioning --annotation-text caption \
   --episodes "$TEST_EPISODE" \
   --grounding-gripper-subdivision \
+  --sam2-full-episode --sam2-gripper-refresh-fps 1 \
   --dst-repo-id "${GROUNDING_REPO}_smoke" \
   --dry-run
 ```
@@ -143,12 +144,19 @@ not validate tracking or SAM masks. The new GPU path still needs this inspection
 
 ## 4. Rerun all available episodes on each VM
 
+Production settings match the spread-out smoke run: full-episode POV masks,
+1 FPS Molmo refreshes, relaxed negative-point conflict/inclusion checks, and
+stationary third-person endpoint goals. Other mask validity checks still apply.
+Do not include smoke outputs in the final combination; these workers process
+their complete available annotation selections into fresh `v3` destinations.
+
 ```bash
 python -m robot101.data.preprocess \
   --annotation-repo-ids "$ANNOTATION_REPO" \
   --annotation-revision "$ANNOTATION_REVISION" \
   --annotation-stage captioning --annotation-text caption \
   --grounding-gripper-subdivision \
+  --sam2-full-episode --sam2-gripper-refresh-fps 1 \
   --tapir-frame-batch-size 256 \
   --dst-repo-id "$GROUNDING_REPO" \
   --resume --push-to-hub
@@ -207,11 +215,11 @@ the same episode, and do not pass the old unified repo as an ordinary worker rep
 source .venv-viewer/bin/activate
 python -m robot101.data.combine_datasets \
   --base-manifest outputs/so101_spread73_v1_unified/manifest.json \
-  --replace-repo kdaterao/so101_spread73_v1_grounded_vm1=kdaterao/so101_spread73_v2_grounded_vm1 \
-  --replace-repo kdaterao/so101_spread73_v1_grounded_vm2=kdaterao/so101_spread73_v2_grounded_vm2 \
-  --replace-repo kdaterao/so101_spread73_v1_grounded_vm3=kdaterao/so101_spread73_v2_grounded_vm3 \
-  --replace-repo kdaterao/so101_spread73_v1_grounded_vm4=kdaterao/so101_spread73_v2_grounded_vm4 \
-  --output-dir outputs/so101_spread73_v2_unified \
+  --replace-repo kdaterao/so101_spread73_v1_grounded_vm1=kdaterao/so101_spread73_v3_grounded_vm1 \
+  --replace-repo kdaterao/so101_spread73_v1_grounded_vm2=kdaterao/so101_spread73_v3_grounded_vm2 \
+  --replace-repo kdaterao/so101_spread73_v1_grounded_vm3=kdaterao/so101_spread73_v3_grounded_vm3 \
+  --replace-repo kdaterao/so101_spread73_v1_grounded_vm4=kdaterao/so101_spread73_v3_grounded_vm4 \
+  --output-dir outputs/so101_spread73_v3_unified \
   --download-workers 1 --rate-limit-wait-minutes 5 \
   --resume
 ```
@@ -227,14 +235,14 @@ remain in the copied sidecars. Missing/failed grounding stays flagged in
 `review.json`. Existing unreviewed Claude labels do not become accepted during joining.
 
 For a quick index-only test, add `--lightweight` and use a separate output folder,
-for example `outputs/so101_spread73_v2_test`. The viewer fetches media/masks from
+for example `outputs/so101_spread73_v3_test`. The viewer fetches media/masks from
 the pinned source repos on demand. A lightweight bundle is not a complete media archive.
 
 ## 6. View, then optionally upload
 
 ```bash
 .venv-viewer/bin/python -m streamlit run scripts/view_combined_dataset.py -- \
-  --root outputs/so101_spread73_v2_unified
+  --root outputs/so101_spread73_v3_unified
 ```
 
 The viewer shows full-episode playback. Point/mask intervals can change more often
@@ -243,11 +251,11 @@ than the revised caption, which still switches at the original annotation bounds
 After inspection, upload separately without rerunning GPU processing or combining:
 
 ```bash
-hf upload-large-folder kdaterao/so101_spread73_v2_unified \
-  outputs/so101_spread73_v2_unified --repo-type dataset
+hf upload-large-folder kdaterao/so101_spread73_v3_unified \
+  outputs/so101_spread73_v3_unified --repo-type dataset
 ```
 
-Alternatively add `--push-to-hub --dst-repo-id kdaterao/so101_spread73_v2_unified`
+Alternatively add `--push-to-hub --dst-repo-id kdaterao/so101_spread73_v3_unified`
 to the combine command. The combiner now uses the large-folder uploader, which
 splits uploads into multiple commits instead of exceeding the single-commit limit.
 

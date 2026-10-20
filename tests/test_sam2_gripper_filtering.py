@@ -123,7 +123,7 @@ class GroundingTests(unittest.TestCase):
         out, calls, seen = self.run_ground({'Point to the battery.': [[12, 12]], 'Point to the robot gripper.': [[11, 11]]})
         self.assertEqual(out['source'], 'semantic_object')
         self.assertEqual(calls, [(2, 'Point to the robot gripper.'), (2, 'Point to the battery.')])
-        self.assertEqual(out['tracking_direction'], 'forward')
+        self.assertEqual(out['tracking_direction'], 'static')
         self.assertGreater(out['distance_to_gripper'], 0)
         self.assertEqual(seen[0], 2)
         self.assertEqual(seen[-1], 6)
@@ -217,14 +217,15 @@ class WeightedSelectionTests(unittest.TestCase):
 
     def test_shared_selection_excludes_unresolved_and_masked_endpoints(self):
         calls = []
-        ns['select_stage_active'] = lambda tracks, visible, **kwargs: (calls.append(kwargs) or {'point_ids': np.arange(len(tracks[0]))})
+        selector = lambda tracks, visible, **kwargs: (calls.append(kwargs) or {'point_ids': np.arange(len(tracks[0]))})
         e = {'tracks': np.zeros((3, 2, 2)), 'visible': np.ones((3, 2), bool),
              'eligible': np.array([False, True, True]), 'observation_weights': np.ones((3, 2)),
              'gripper_filter': {'manual_review_required': False}}
         failed = {**e, 'gripper_filter': {'manual_review_required': True}}
         args = SimpleNamespace(num_poi_points=2, n_clusters=2, static_thresh=.03,
                                funnel_quantile=.4, goal_tail_frames=1, seed=0)
-        selected, _ = ns['_select_pov_points']([[e], [failed]], [[1], [1]], args, None)
+        with patch('robot101.perception.motion_plan.select_stage_active', side_effect=selector):
+            selected, _ = ns['_select_pov_points']([[e], [failed]], [[1], [1]], args, None)
         self.assertEqual(selected[0, 0].tolist(), [1, 2])
         self.assertEqual(selected[1, 0].tolist(), [])
         self.assertEqual(len(calls), 1)

@@ -4,7 +4,7 @@ import sys
 from tempfile import TemporaryDirectory
 import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
-from grounded_destination import recover_empty_destination, check_resume_metadata
+from robot101.data.utilities.destination import recover_empty_destination, check_resume_metadata
 
 class DestinationTests(unittest.TestCase):
     def setup_root(self, folder, episodes=0):

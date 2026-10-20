@@ -121,6 +121,9 @@ joined JSON metadata, not all videos. Only the selected episode's videos and
 masks are fetched. Playback runs across the whole episode, updating the caption
 at subtask boundaries. Masks and visible grounding dots are rendered in cached
 H.264 previews; stored videos stay unchanged. Camera players are independent.
+SAM masks are hidden by default and previous-interval cyan dots display for
+0.5 seconds. Add `--transition-display-seconds N` after the launch command's `--`
+to change this display duration, or `--show-masks` to show SAM masks again.
 
 The default uses `outputs/so101_spread73_v1_unified` if it contains
 `subtasks.jsonl`; otherwise it uses `kdaterao/so101_spread73_v1_unified` on the Hub.

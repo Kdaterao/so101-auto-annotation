@@ -18,7 +18,7 @@ from robot101.data.utilities.annotation_tree import (
     SCHEMA_VERSION, atomic_json, average_observations, build_tree, cached_json,
     fingerprint, midpoint, sampled_frames, uniform_frames, windows, write_exports, write_report,
 )
-from robot101.data.utilities.episode_helpers import DEFAULT_SRC, _load_lerobot, _parse_episodes
+from robot101.data.utilities.episode_helpers import DEFAULT_SRC, _load_lerobot, _parse_episodes, shard_episodes
 from robot101.data.utilities.episode_io import load_episode_metadata, decode_episode_cameras
 from robot101.data.utilities.annotation_hub import add_hub_arguments, validate_hub_arguments, publish_annotations
 
@@ -34,7 +34,10 @@ def build_parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--src-repo-id", default=DEFAULT_SRC)
     p.add_argument("--src-revision", default=None, help="Default: LeRobot's compatible dataset revision")
-    p.add_argument("--episodes", default="0", help="Inclusive ranges, e.g. 0-25:5")
+    p.add_argument("--episodes", default="0", help="Comma-separated inclusive ranges, e.g. 0-25:5,100,688:694:2")
+    p.add_argument("--num-shards", type=int, default=1, help="Number of independent episode workers")
+    p.add_argument("--shard-index", type=int, default=0, help="Zero-based worker index for round-robin episode selection")
+    p.add_argument("--list-episodes", action="store_true", help="Print selected episodes/count without downloads or model loading")
     p.add_argument("--camera", default="top")
     p.add_argument("--helper-camera", default="wrist", help="Synchronized auxiliary camera for captioning")
     p.add_argument("--helper-event-frames", type=int, default=5,
@@ -439,7 +442,19 @@ def preceding_subtask_contexts(records):
 
 
 def main(argv=None):
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        requested = _parse_episodes(args.episodes) or []
+        selected = shard_episodes(requested, args.num_shards, args.shard_index)
+        if not selected:
+            raise ValueError("This worker has no selected episodes")
+    except ValueError as exc:
+        parser.error(str(exc))
+    if args.list_episodes:
+        print(json.dumps(dict(total_episodes=len(requested), shard_index=args.shard_index,
+                              num_shards=args.num_shards, worker_episodes=len(selected), episodes=selected), indent=2))
+        return
     from robot101.data.utilities.hardware_usage import HardwareUsage
     usage = HardwareUsage()
     try:
@@ -466,9 +481,14 @@ def _run(args, usage):
     os.environ["SO101_HF_DOWNLOAD_WORKERS"] = str(args.download_workers)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     run = resolve_run(args)
-    episodes = _parse_episodes(args.episodes)
-    if not episodes or any(i < 0 or i >= run["total_episodes"] for i in episodes):
+    requested = _parse_episodes(args.episodes) or []
+    if not requested or any(i < 0 or i >= run["total_episodes"] for i in requested):
         raise SystemExit("Select existing episodes explicitly, e.g. --episodes 0-9")
+    episodes = shard_episodes(requested, args.num_shards, args.shard_index)
+    print(f"Episode worker {args.shard_index + 1}/{args.num_shards}: {len(episodes)} of {len(requested)} episodes "
+          f"(inclusive endpoints): {','.join(map(str, episodes))}", flush=True)
+    atomic_json(args.output_dir / "episode_selection.json", dict(requested_episodes=requested,
+                episodes=episodes, num_shards=args.num_shards, shard_index=args.shard_index))
     dataset_class, _, _, cache_root = _load_lerobot()
     source = lambda episode: load_source_episode(dataset_class, args.src_repo_id, episode,
                  cache_root / args.src_repo_id, run["resolved"]["source"], args.video_backend)

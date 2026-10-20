@@ -8,13 +8,14 @@ import os
 from pathlib import Path
 import re
 import time
+import math
 
 from robot101.data.utilities.annotation_tree import (
     atomic_json, cached_json, descendants, fingerprint, write_exports,
 )
 from robot101.data.utilities.annotation_hub import add_hub_arguments, validate_hub_arguments, publish_annotations
 
-PROMPT_VERSION = "action100m-robotics-v10-evidence-reconciliation"
+PROMPT_VERSION = "action100m-robotics-v15-boundary-stillness"
 STRING_FIELDS = ("brief_action", "detailed_action", "actor", "brief_caption", "detailed_caption")
 ROBOTICS_FIELDS = ("manipulated_object", "destination", "completion_condition")
 
@@ -42,7 +43,38 @@ def annotation_output_schema():
     })
 
 
-def build_evidence(record, node):
+def stillness_evidence(record, node, threshold, *, first_last_only=False):
+    """Send only conservative low-translation windows, never positive motion cues."""
+    profile = node.get("motion_profile")
+    if not profile:
+        return None
+    windows = []
+    for row in profile["windows"]:
+        if (row["status"] == "ok" and row["max_excursion"] <= threshold
+                and row["path_length"] <= threshold):
+            windows.append({key: row[key] for key in (
+                "start_frame", "end_frame", "start_seconds", "end_seconds",
+                "net_displacement", "max_excursion", "path_length")})
+    selected = set(record["selected_node_ids"])
+    cut = sorted((n for n in record["nodes"] if n["id"] in selected), key=lambda n: n["start_frame"])
+    boundary_roles = []
+    if cut and node["id"] == cut[0]["id"]:
+        boundary_roles.append("first")
+    if cut and node["id"] == cut[-1]["id"]:
+        boundary_roles.append("last")
+    if first_last_only and not boundary_roles:
+        return None
+    return dict(policy="stillness_only", status="ok" if windows else "no_qualifying_windows",
+                boundary_roles=boundary_roles, position_unit=profile["position_unit"],
+                low_translation_threshold=threshold,
+                qualification="Both max_excursion and path_length <= threshold; not a probability",
+                start_frame=node["start_frame"], end_frame=node["end_frame"],
+                windows=windows, source=profile.get("source"),
+                omitted_windows_meaning="No motion guidance; omitted windows may be moving, noisy or unavailable. They are not evidence of movement.")
+
+
+def build_evidence(record, node, *, use_task_prompt=False, motion_stillness_threshold=0.03,
+                   motion_first_last_only=False):
     def caption(n):
         result = n.get("caption", {})
         return dict(node_id=n["id"], start_frame=n["start_frame"], end_frame=n["end_frame"],
@@ -52,12 +84,16 @@ def build_evidence(record, node):
                     views=result.get("views", []), helper_status=result.get("helper_status"))
     lookup = {n["id"]: n for n in record["nodes"]}
     root = lookup[record["root_id"]]
+    motion = stillness_evidence(record, node, motion_stillness_threshold,
+                                first_last_only=motion_first_last_only)
     return dict(episode_index=record["episode_index"], source_repo_id=record["source_repo_id"],
                 source_revision=record["source_revision"], camera=record["camera"], fps=record["fps"],
-                bounds="half_open_source_frames", task_context=record.get("task", ""),
+                bounds="half_open_source_frames",
+                **({"task_context": record.get("task", "")} if use_task_prompt else {}),
                 current=caption(node), descendants_depth_first=[caption(n) for n in descendants(record, node["id"])],
                 global_context=[caption(root), *[caption(lookup[i]) for i in root["children"]]],
-                grounding_diagnostics=record.get("grounding_diagnostics"))
+                grounding_diagnostics=record.get("grounding_diagnostics"),
+                **({"motion_profile": motion} if motion else {}))
 
 
 def request_prompt(evidence, previous=None):
@@ -105,6 +141,34 @@ def request_prompt(evidence, previous=None):
         "in suggested_changes, with review_status needs_review. Output only JSON matching this template:\n" +
         json.dumps(schema) + "\nEVIDENCE:\n" + json.dumps(evidence)
     )
+    if "motion_profile" in evidence:
+        instruction += (
+            "\nSTILLNESS-ONLY MOTION GUIDANCE: The motion_profile contains only valid windows where "
+            "both recorded TCP position excursion and path length are at or below the stated threshold. "
+            "Use these measurements only to challenge unsupported substantial TCP translation claims "
+            "at the SAME times. Pay particular attention to the FIRST and LAST selected subtasks, "
+            "identified by boundary_roles: do not invent an approach or transport sequence in an opening "
+            "low-translation window, or an extra manipulation/return motion in a closing low-translation "
+            "window. These are cautions, not assumed idle phases. A low-translation window does not "
+            "prove all arm links are stationary and does not rule out rotation, finger motion, contact, "
+            "holding, release or tool interaction. Units labeled native are not confirmed meters; "
+            "the threshold is an uncalibrated tolerance, not a probability. Other windows are omitted "
+            "deliberately: omission or no_qualifying_windows means NO motion guidance, not evidence "
+            "that movement occurred. Do not infer actions, direction, reversal or successful interaction "
+            "from measurement availability, gaps between low-translation windows or their end times. "
+            "Outside these windows, use caption evidence normally. Never shift a captioned action to "
+            "another time to evade conflicting measurements. For material disagreement, qualify the "
+            "action and request review. Keep metrics, node IDs and conflict analysis in evidence/review "
+            "fields rather than the rewritten action narrative."
+        )
+    if "task_context" in evidence:
+        instruction += (
+            "\nThe task_context field is the source dataset's original episode instruction. It may "
+            "clarify the intended goal or desired completion condition, but it is not an observation. "
+            "Do not invent actions, objects, destinations or success to match it, or override contradictory "
+            "visual-caption evidence. An episode-level goal need not be completed in this subtask. "
+            "If the instruction is empty, treat the intended goal as unavailable."
+        )
     if previous is not None:
         instruction += ("\nPREVIOUS ANNOTATION:\n" + json.dumps(previous) +
                         "\nCritique the previous annotation against the evidence, then revise it. "
@@ -237,7 +301,9 @@ class ClaudeClient:
 
 
 def aggregate_node(record, node, path, config, client, resume=False):
-    evidence = build_evidence(record, node)
+    evidence = build_evidence(record, node, use_task_prompt=config.get("use_task_prompt", False),
+                              motion_stillness_threshold=config.get("motion_stillness_threshold", 0.03),
+                              motion_first_last_only=config.get("motion_first_last_only", False))
     key = fingerprint(dict(config=config, evidence=evidence))
     state = cached_json(path, key, resume)
     if state and state.get("status") == "ok":
@@ -356,6 +422,20 @@ def main(argv=None):
                    help="Run only the initial annotation (equivalent to --rounds 1); skip critique/revision rounds")
     p.add_argument("--node-scope", choices=["selected", "all"], default="selected",
                    help="Aggregate selected controller subtasks (default), or every retained node")
+    p.add_argument("--use-task-prompt", action="store_true",
+                   help="Include the source dataset's original episode task text as intended-goal context")
+    p.add_argument("--use-motion-profile", action="store_true",
+                   help="Supply half-second TCP displacement evidence from pinned source state parquet (no GPU/video)")
+    p.add_argument("--motion-first-last-only", action="store_true",
+                   help="Enable motion guidance only for first/last selected subtasks; implies --use-motion-profile")
+    p.add_argument("--motion-stillness-threshold", type=float, default=0.03,
+                   help="Send only windows whose excursion AND path length are <= this native-position tolerance; 0 means exact zero")
+    p.add_argument("--motion-window-seconds", type=float, default=0.5)
+    p.add_argument("--motion-displacement-scale", type=float, default=0.005,
+                   help="Recorded XYZ excursion giving movement_score=1, in the stated position units")
+    p.add_argument("--motion-position-unit", choices=["native", "m", "cm", "mm"], default="native",
+                   help="Declare source XYZ units; this labels values and does not convert them")
+    p.add_argument("--motion-max-gap-seconds", type=float, default=0.1)
     p.add_argument("--concurrency", type=int, default=2)
     p.add_argument("--max-tokens", type=int, default=2048)
     p.add_argument("--resume", action="store_true")
@@ -364,11 +444,18 @@ def main(argv=None):
     p.add_argument("--grounding-diagnostics", type=Path, help="Optional JSONL keyed by source episode_index")
     add_hub_arguments(p)
     args = p.parse_args(argv)
+    if args.motion_first_last_only:
+        args.use_motion_profile = True
     if args.no_review:
         args.rounds = 1
     validate_hub_arguments(args)
     if min(args.rounds, args.concurrency, args.max_tokens) < 1:
         p.error("Rounds, concurrency and output token cap must be positive")
+    for name in ("motion_window_seconds", "motion_displacement_scale", "motion_max_gap_seconds"):
+        if not math.isfinite(getattr(args, name)) or getattr(args, name) <= 0:
+            p.error(f"--{name.replace('_', '-')} must be finite and positive")
+    if not math.isfinite(args.motion_stillness_threshold) or args.motion_stillness_threshold < 0:
+        p.error("--motion-stillness-threshold must be finite and nonnegative")
     from robot101.data.utilities.episode_helpers import _parse_episodes
     episodes = _parse_episodes(args.episodes)
     try:
@@ -386,7 +473,14 @@ def main(argv=None):
         if record["episode_index"] in diagnostics:
             record["grounding_diagnostics"] = diagnostics[record["episode_index"]]
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    config = dict(model=args.model, rounds=args.rounds, max_tokens=args.max_tokens, prompt_version=PROMPT_VERSION)
+    config = dict(model=args.model, rounds=args.rounds, max_tokens=args.max_tokens,
+                  prompt_version=PROMPT_VERSION, use_task_prompt=args.use_task_prompt)
+    motion_config = dict(window_seconds=args.motion_window_seconds,
+                         displacement_scale=args.motion_displacement_scale,
+                         max_gap_seconds=args.motion_max_gap_seconds, position_unit=args.motion_position_unit)
+    config["motion_profile"] = motion_config if args.use_motion_profile else None
+    config["motion_stillness_threshold"] = args.motion_stillness_threshold if args.use_motion_profile else None
+    config["motion_first_last_only"] = args.motion_first_last_only
     run_key = fingerprint(config)
     run_path = args.output_dir / "run.json"
     if not args.dry_run:
@@ -396,8 +490,23 @@ def main(argv=None):
     cached_nodes = 0
     for record in records:
         record["aggregation_scope"] = args.node_scope
+        record["aggregation_use_task_prompt"] = args.use_task_prompt
         targets = (set(record["selected_node_ids"]) if args.node_scope == "selected"
                    else {node["id"] for node in record["nodes"]})
+        for node in record["nodes"]:
+            node.pop("motion_profile", None)
+        motion_targets = targets
+        if args.motion_first_last_only:
+            selected = set(record["selected_node_ids"])
+            cut = sorted((n for n in record["nodes"] if n["id"] in selected), key=lambda n: n["start_frame"])
+            boundary_ids = {cut[0]["id"], cut[-1]["id"]} if cut else set()
+            motion_targets = targets & boundary_ids
+        if args.use_motion_profile and motion_targets:
+            from robot101.data.utilities.cartesian_motion import attach_motion_profiles
+            try:
+                attach_motion_profiles(record, motion_targets, args.output_dir, motion_config)
+            except (OSError, ValueError, KeyError, RuntimeError) as exc:
+                p.error(f"Motion profile failed for episode {record['episode_index']}: {exc}")
         record["aggregated_node_ids"] = [n["id"] for n in record["nodes"] if n["id"] in targets]
         for node in record["nodes"]:
             if node["id"] not in targets:
@@ -407,11 +516,14 @@ def main(argv=None):
                 continue
             requested_nodes += 1
             path = args.output_dir / "nodes" / f'ep{record["episode_index"]:06d}' / f'{node["id"]}.json'
-            key = fingerprint(dict(config=config, evidence=build_evidence(record, node)))
+            evidence = build_evidence(record, node, use_task_prompt=args.use_task_prompt,
+                                      motion_stillness_threshold=args.motion_stillness_threshold,
+                                      motion_first_last_only=args.motion_first_last_only)
+            key = fingerprint(dict(config=config, evidence=evidence))
             cached = cached_json(path, key, args.resume) if not args.dry_run else None
             if args.dry_run:
                 atomic_json(args.output_dir / "request_previews" / f'ep{record["episode_index"]:06d}_{node["id"]}.json',
-                            dict(model=args.model, rounds=args.rounds, prompt=request_prompt(build_evidence(record, node))))
+                            dict(model=args.model, rounds=args.rounds, prompt=request_prompt(evidence)))
             elif cached and cached.get("status") == "ok":
                 node["aggregation"] = cached
                 cached_nodes += 1

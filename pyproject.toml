@@ -3,13 +3,29 @@ requires = ["setuptools>=71"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "robot-101"
+name = "so101-auto-annotation"
 version = "0.1.0"
+description = "Annotation, segmentation, spatial grounding, and dataset tools for SO-101 demonstrations"
+readme = "README.md"
 requires-python = ">=3.12,<3.14"
 dependencies = [
-    "lerobot[feetech,placo-dep, dataset, smolvla]",
-    "pygame>=2.6",
+    "lerobot[dataset]",
+    "anthropic>=0.40",
+    "av>=12",
+    "einops>=0.8",
+    "huggingface-hub>=0.27",
+    "numpy>=1.26",
+    "opencv-python>=4.10",
+    "pillow>=10",
+    "scipy>=1.13",
+    "torch>=2.4",
+    "torchvision>=0.19",
+    "transformers>=4.46",
 ]
+
+[project.optional-dependencies]
+viewer = ["streamlit>=1.40", "plotly>=5.24"]
+dev = ["pytest>=8", "ruff>=0.8"]
 
 [tool.uv]
 python-preference = "only-managed"
@@ -22,5 +38,6 @@ where = ["src"]
 include = ["robot101*"]
 namespaces = false
 
-[tool.setuptools.package-data]
-robot101 = ["legacy/simulation/assets/so101/**/*", "calibration/*.md"]
+[tool.pytest.ini_options]
+pythonpath = ["src", "scripts"]
+testpaths = ["tests"]

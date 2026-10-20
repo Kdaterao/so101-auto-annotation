@@ -72,6 +72,62 @@ You can run segmentation first with `--stage segment`, then captions using
 feature, segmentation and per-node caption artifacts are reused; failed node
 captions are retried. Incompatible settings require another output directory.
 
+### Multiple episode ranges and parallel workers
+
+`--episodes` accepts a comma-separated union of IDs and ranges. Both
+`10-20:2` and `10:20:2` mean **inclusive** endpoints, giving
+`10,12,14,16,18,20`. Mixed spellings are allowed. Overlaps are deduplicated and
+IDs are sorted before processing. Zero steps, negative IDs, malformed ranges
+and descending ranges are rejected. These episode-selection endpoints are
+separate from the half-open frame bounds used inside each caption node.
+
+This selection contains **73 episodes** and omits already-computed episodes 3–5:
+
+```bash
+ANNOTATION_EPISODES='10-20:2,490-500:2,688:694:2,890:900:2,1700:1710:2,2000-2010:2,3400-3410:2,3690-3700:2,4700-4710:2,5300:5304:2,6840-6850:2,7700-7710:2,10590:10600:2'
+```
+
+On each VM, use the **same selection and worker count**, but a different
+zero-based `--shard-index`. The script round-robin partitions episode IDs;
+2 workers get 37/36 episodes, 3 get 25/24/24, and 4 get 19/18/18/18.
+No episode appears in two worker shards. Each VM runs its own complete annotation
+pipeline and does not communicate with the others.
+
+Preview the worker's selection without downloads, GPU loading or output files:
+
+```bash
+python -m robot101.data.annotate --episodes "$ANNOTATION_EPISODES" \
+  --num-shards 4 --shard-index 0 --list-episodes
+```
+
+Run this on each VM, changing `ANNOTATION_WORKER` to 0, 1, 2 or 3. For two workers,
+set `ANNOTATION_WORKERS=2` on both and use indices 0 and 1. Keep output directories
+and destination repositories distinct; do not have workers overwrite one shared
+dataset's run manifests and summary files.
+
+```bash
+ANNOTATION_WORKERS=4
+ANNOTATION_WORKER=0
+PYTORCH_ALLOC_CONF=expandable_segments:True \
+python -m robot101.data.annotate \
+  --episodes "$ANNOTATION_EPISODES" \
+  --num-shards "$ANNOTATION_WORKERS" --shard-index "$ANNOTATION_WORKER" \
+  --output-dir "outputs/annotations_spread73_worker${ANNOTATION_WORKER}" \
+  --video-model facebook/Perception-LM-3B \
+  --image-model Qwen/Qwen3-VL-8B-Instruct \
+  --caption-quantization none --max-caption-tokens 512 \
+  --video-batch-size 24 --image-batch-size 24 \
+  --push-to-hub \
+  --dst-repo-id "kdaterao/so101_annotations_spread73_worker${ANNOTATION_WORKER}"
+```
+
+Each run saves `episode_selection.json` with requested and assigned IDs. Use
+`--resume` with the same worker configuration to continue a worker's output.
+For reproducibility, use the same explicit `--src-revision` on all VMs (ideally
+the immutable source SHA in the existing annotations' `source_revision` field),
+particularly when retaining previously computed episodes. The shared range parser
+also supports mixed multi-range selection for aggregation and grounding.
+
 ### Useful arguments
 
 | Argument | Default | Purpose |
@@ -451,6 +507,92 @@ The script prints the requested, cached and pending node counts before API work.
 Missing or truncated captions require review when they materially affect the annotation;
 task text is intended context, not proof of success. Desired completion conditions
 are not observed success labels.
+
+### Half-second gripper displacement evidence
+
+Add `--use-motion-profile` during **aggregation** to give Claude measured gripper
+translation in 0.5-second windows. This works with existing caption datasets:
+it downloads pinned source **state parquet and metadata only**, without fetching
+or decoding videos, loading visual models, or regenerating captions.
+
+The default source already stores `ee.x`, `ee.y`, `ee.z` in `observation.state`.
+These are recorded Cartesian end-effector positions, so no kinematics conversion
+is needed. Converting joint angles to TCP position would be **forward** kinematics;
+joint-only datasets are rejected here until a validated conversion is provided.
+The source revision, episode ID, frame order, frame count and timestamps must
+match the caption artifact. Source cache directories are isolated by revision,
+so newer trimmed/reindexed datasets cannot silently replace the caption source.
+
+The full measurement sidecar reports net displacement, maximum pairwise excursion, accumulated
+path length and mean path speed. `movement_score = min(1, max_excursion / scale)`
+is a heuristic translation score, **not a probability**. Excursion and path length
+expose out-and-back motion even when net displacement is near zero; path length
+can include sensor noise. Adjacent windows share interpolated boundary positions,
+using samples strictly inside the subtask. Missing/nonfinite positions, too few
+samples and timestamp gaps produce explicit unknown windows, not zero movement.
+
+**Claude receives stillness-only guidance:** only valid windows where both
+excursion and path length are at or below `--motion-stillness-threshold` are
+included. The default tolerance is `0.03` in recorded position units (3 cm
+only if those units are meters). This applies per half-second window by default.
+It indicates low translation rather than guaranteed immobility and can suppress
+small real movements. Use `0` for exact-zero-only guidance. This is a
+conservative translation tolerance that needs calibration, not proof every arm
+joint is stationary. Movement scores and moving-window measurements are withheld
+from Claude so they cannot be used to justify action claims. Omitted windows
+mean no measurement guidance, not evidence of movement. First/last selected
+subtasks are explicitly identified for extra scrutiny of invented approach,
+transport or return-to-rest claims. By default other subtasks receive the same
+filtering. Add `--motion-first-last-only` to limit both computation and guidance
+to the first and last selected subtask in each episode. This flag also enables
+`--use-motion-profile`. Middle subtasks receive no motion measurements; if an
+episode has only one selected subtask, it receives one profile, marked both first
+and last. With `--node-scope all`, the boundaries still refer to the selected cut.
+
+Controls:
+
+- `--motion-window-seconds 0.5`: window duration.
+- `--motion-first-last-only`: enable guidance for first/last selected subtasks only.
+- `--motion-stillness-threshold 0.03`: maximum excursion **and** path length
+  for a window to be included in Claude's low-translation guidance.
+- `--motion-displacement-scale 0.005`: excursion at which the score reaches 1,
+  in recorded position units. Tune this using known motion/no-motion intervals.
+- `--motion-position-unit native`: default, because the source feature schema
+  names XYZ but does not declare physical units. Set `m`, `cm` or `mm` only after
+  confirming the raw source units; this labels measurements and does not rescale
+  them. If XYZ is in meters, `0.005` means 5 mm.
+- `--motion-max-gap-seconds 0.1`: larger sample gaps make a window unknown.
+
+Quaternion rotation excursion and raw jaw-position range remain in the full
+measurement sidecar when available. Low TCP translation does **not** mean every arm link is stationary,
+and does not exclude rotation, contact, holding, opening/closing, release or tool
+interaction. Movement alone does not establish object identity or successful action.
+Claude gets these caveats and applies low-translation evidence at matching times only.
+It must not shift a caption's claimed action to a different time merely to match
+a later motion window. Exact zero translation measurements cannot corroborate
+approach/withdraw claims in that window. Scalar scores do not establish direction
+or a reversal; unresolved directional or temporal contradictions require a less
+specific caption and review. Metric values, node IDs and conflict analysis belong
+in diagnostic evidence fields rather than the rewritten action narrative.
+
+```bash
+python -m robot101.data.aggregate_annotations \
+  --src-repo-id kdaterao/so101_annotations_plm3b_verified_spread5 \
+  --episodes 0-400:100 \
+  --output-dir outputs/aggregated_plm3b_spread5_motion \
+  --use-motion-profile --motion-window-seconds 0.5 \
+  --node-scope selected --rounds 3 --concurrency 2 --max-tokens 4096
+```
+
+Use a new aggregation output directory; resume rejects changed motion settings.
+`motion_profiles/epNNNNNN.json` is cached atomically, independently of Claude
+responses. Each episode/node retains its full `motion_profile`; the API evidence
+and node response logs retain the filtered version actually sent to Claude.
+The viewer's **Measured gripper displacement supplied to Claude** section now
+shows that filtered API evidence rather than the full measurement sidecar.
+`--dry-run` computes/caches the profiles and writes request previews without API
+calls. Source/schema mismatches stop before any paid requests. No extra package
+is required beyond the existing viewer/annotation LeRobot and NumPy dependencies.
 
 ### Optional original task prompt
 

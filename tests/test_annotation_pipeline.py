@@ -145,6 +145,7 @@ class AdapterTests(unittest.TestCase):
                 return self
         worker = object.__new__(Captioner)
         worker.torch, worker.kind, worker.device, worker.dtype = torch, "video", "cpu", torch.float32
+        worker.qwen_video = False
         worker.processor = Mock()
         worker.processor.apply_chat_template.return_value = ["video prompt"]
         worker.processor.return_value = Inputs(input_ids=torch.tensor([[3, 4]]),
@@ -220,7 +221,7 @@ class AggregationTests(unittest.TestCase):
         self.assertEqual([n["node_id"] for n in evidence["descendants_depth_first"]],
                          [n["id"] for n in descendants(record, root["id"])])
         self.assertEqual(evidence["global_context"][0]["node_id"], root["id"])
-        self.assertEqual(evidence["task_context"], record["task"])
+        self.assertEqual(build_evidence(record, root, use_task_prompt=True)["task_context"], record["task"])
 
     def test_rounds_repair_usage_and_completed_resume(self):
         record = episode()
@@ -323,10 +324,10 @@ class AggregationTests(unittest.TestCase):
             with patch.dict("os.environ", {"ANTHROPIC_API_KEY": "mock"}), \
                  patch("robot101.data.aggregate_annotations.ClaudeClient", return_value=client):
                 aggregate_main(argv)
-            self.assertEqual(client.calls, len(record["nodes"]))
+            self.assertEqual(client.calls, len(record["selected_node_ids"]))
             summary = json.loads((root / "output" / "summary.json").read_text())
             self.assertEqual(summary["failures"], 0)
-            self.assertEqual(summary["usage"]["input_tokens"], 5 * len(record["nodes"]))
+            self.assertEqual(summary["usage"]["input_tokens"], 5 * len(record["selected_node_ids"]))
             selected = json.loads((root / "output" / "annotations_subtasks.jsonl").read_text())
             self.assertEqual(len(selected["nodes"]), len(record["selected_node_ids"]))
             with patch.dict("os.environ", {}, clear=True), \
