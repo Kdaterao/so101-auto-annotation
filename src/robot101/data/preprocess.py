@@ -41,8 +41,7 @@ from robot101.data.utilities.episode_helpers import (
     _save_progress,
 )
 from robot101.perception.molmo2 import Molmo2Worker
-from robot101.perception.gripper_masks import GripperMaskWorker, BODY_PROMPT
-from robot101.data.utilities.gripper_filtering import prepare_gripper_filter
+from robot101.perception.gripper_masks import GripperMaskWorker
 from robot101.data.utilities.episode_gripper_masks import prepare_episode_masks, apply_episode_masks
 from robot101.data.utilities.episode_io import load_episode_metadata, decode_episode_cameras
 from robot101.data.utilities.destination import recover_empty_destination, check_resume_metadata
@@ -586,6 +585,11 @@ def main() -> None:
         raise SystemExit("Stage frame/count limits must be positive")
     if args.sam2_seed_search_frames < 1:
         raise SystemExit("--sam2-seed-search-frames must be positive")
+    if args.pov_gripper_filter and not args.sam2_full_episode:
+        raise SystemExit(
+            "POV SAM 2 filtering requires --sam2-full-episode so Molmo localizes once "
+            "and TAPIR supplies all later gripper tracks and SAM re-seeds"
+        )
     if args.sam2_max_recoveries < 0 or args.sam2_recovery_retry_frames < 1:
         raise SystemExit("SAM recovery count must be nonnegative and retry frames positive")
     if not np.isfinite(args.sam2_gripper_refresh_fps) or args.sam2_gripper_refresh_fps < 0:
@@ -629,7 +633,7 @@ def main() -> None:
                       if key.startswith("gripper_") or key in ("min_stage_frames", "max_stages")})
         annotation_manifest["fingerprint"] = fingerprint(annotation_manifest)
     goal_policy = {"third_person_goals": "static_endpoint_snapshot_v1",
-                   "pov_mask_policy": "full_episode_pov_sparse_refresh_v5_relaxed_negatives" if args.sam2_full_episode else "sequential_body_mask_object_negatives_v3_relaxed_negatives",
+                  "pov_mask_policy": "full_episode_pov_molmo_seed_tapir_tracking_v6" if args.pov_gripper_filter else "disabled",
                    "mask_settings": {key: value for key, value in vars(args).items()
                                      if key.startswith("sam2_") and key != "sam2_corrections"},
                    "mask_corrections_fingerprint": fingerprint(json.loads(args.sam2_corrections.read_text()))
@@ -860,38 +864,15 @@ def main() -> None:
                 )
                 tail_indices.update(range(window_start, window_end + 1))
             decode_episode_cameras(source, data, [CAMERA_WRIST],
-                                   indices=None if sam is not None and args.sam2_full_episode else tail_indices,
+                                   indices=None if sam is not None else tail_indices,
                                    batch_size=args.decode_batch_size, backend=args.video_backend)
             episode_cache = []
-            body_results = {}
             episode_masks = None
-            if sam is not None and args.sam2_full_episode:
+            if sam is not None:
                 validate_episode_shapes(data, src_meta.features, [CAMERA_WRIST])
                 episode_masks, episode_mask_valid, episode_mask_info = prepare_episode_masks(
                     data['frames'][CAMERA_WRIST], data['masks'][CAMERA_WRIST],
-                    molmo, sam, bank_root, ep_idx, corrections, args, fps=fps)
-            if sam is not None and not args.sam2_full_episode and hasattr(molmo, "ground_batch"):
-                requests, request_stages = [], []
-                for si, stage in enumerate(stages):
-                    if f"{ep_idx}:{si}" in corrections:
-                        continue
-                    lo, hi = _stage_cluster_bounds(stages, si, data["n"], args.cluster_tail_frames, args.pov_next_stage_frames)
-                    real = np.flatnonzero(data["masks"][CAMERA_WRIST][lo:hi+1])
-                    for index in real[:args.sam2_seed_search_frames]:
-                        frame_index = lo + int(index)
-                        requests.append((data["frames"][CAMERA_WRIST][frame_index], BODY_PROMPT))
-                        request_stages.append((si, frame_index))
-                if requests:
-                    try:
-                        results = molmo.ground_batch(requests)
-                        if len(results) != len(requests):
-                            raise ValueError("Body-prompt batch length mismatch")
-                        for (si, frame_index), result in zip(request_stages, results):
-                            body_results.setdefault(si, []).append((frame_index, result))
-                    except Exception as exc:
-                        body_results = {}
-                        for si, frame_index in request_stages:
-                            body_results.setdefault(si, []).append((frame_index, {"error": str(exc)}))
+                    molmo, tapir, sam, bank_root, ep_idx, corrections, args, fps=fps)
             for si, stage in enumerate(stages):
                 _, window_end = _stage_cluster_bounds(
                     stages, si, data["n"], args.cluster_tail_frames, args.pov_next_stage_frames
@@ -904,17 +885,6 @@ def main() -> None:
                 if episode_masks is not None:
                     apply_episode_masks(entry, episode_masks, episode_mask_valid, episode_mask_info,
                                         args.gripper_proximity_weight, args.gripper_proximity_radius, args.goal_tail_frames)
-                elif sam is not None:
-                    prepare_gripper_filter(
-                        entry, data["frames"][CAMERA_WRIST], data["masks"][CAMERA_WRIST],
-                        molmo, sam, bank_root, ep_idx, si, corrections,
-                        args.gripper_proximity_weight, args.gripper_proximity_radius, args.goal_tail_frames,
-                        prompt_candidates=body_results.get(si), seed_search_frames=args.sam2_seed_search_frames,
-                        negative_prompts=args.sam2_negative_prompts,
-                        require_negatives=args.sam2_require_negative_points,
-                        max_area_fraction=args.sam2_max_area_fraction,
-                        max_growth_ratio=args.sam2_max_growth_ratio,
-                        growth_area_fraction=args.sam2_growth_area_fraction)
                 episode_cache.append(entry)
             del episode_masks
             tail_cache.append(episode_cache)

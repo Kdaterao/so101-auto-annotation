@@ -1,5 +1,8 @@
 # Episode segmentation and annotation
 
+For the complete single-VM setup, captioning, aggregation, and viewing sequence,
+see [single_vm_caption_pipeline.md](single_vm_caption_pipeline.md).
+
 This is an **Action100M adaptation**, not an exact reproduction. It preserves
 temporal Ward hierarchies and the Tree-of-Captions: midpoint image captions on
 retained leaves, video captions on retained internal nodes, and text aggregation
@@ -9,6 +12,24 @@ Perception-LM-3B supplies internal-node video captions; Qwen3-VL-8B-Instruct
 supplies leaf-image captions. PLM uses SDPA for text and eager vision attention;
 Qwen uses SDPA. This further
 model substitution needs quality and runtime evaluation; a speedup is not assumed.
+
+The models have separate annotation roles. V-JEPA 2.1 produces video features
+for temporal segmentation; it does not generate text captions. Perception-LM-3B
+describes motion and actions from video segments. Qwen3-VL-8B describes static
+visual details from still images and is instructed not to infer actions or motion.
+Claude's aggregation pass uses video captions as the action evidence and image
+captions for object identity, appearance, and spatial context. It must not infer
+an action from an image-only description.
+
+The adaptive JEPA cut remains the visual hierarchy's selected cut. By default,
+settled gripper open/close events can further split those selected intervals into
+controller subtasks; they do not rewrite the Ward hierarchy. Each event-generated
+interval is captioned from its own video frames and records its enclosing JEPA
+node. The default minimum duration is `0.5` seconds for every resulting interval.
+The gripper detector requires settled movement of at least 25% of the episode's
+smoothed gripper range. Use `--no-gripper-event-segmentation` to disable the
+additional splits, `--gripper-min-subtask-duration` to change the duration limit,
+or `--gripper-min-change-frac` to change the movement requirement.
 
 These commands annotate existing LeRobot episodes. They do **not** run Molmo,
 TAPIR, or SAM 2, modify the grounding preprocessor, or train models. Original
@@ -222,23 +243,21 @@ requested count; the actual indices and timestamps are saved. Episode task text
 is not used to imply observed actions or success. A synchronized wrist/POV view
 is supplied as visual helper context by default, an explicit robotics adaptation.
 
-The default caption prompt is restored to the original neutral instruction:
-**“Describe this video in detail.”** or **“Describe this image in detail.”**
-Video prompts require visible frame-to-frame support for robot movement and
-prohibit invented back-and-forth actions when the arm remains in place. Small
-finger/object changes are distinct from arm movement, and camera jitter is not
-robot motion. A single unchanged frame does not establish whole-clip stillness.
-It also asks the model to focus on observable interactions between the robotic
-arm and scene objects, rather than only inventorying objects or describing posture.
-This includes visible tool-mediated interactions: distinguish a held tool from
-its target and describe their contact or effect, without requiring finger-to-target
-contact or assuming that every held object is a tool.
-Camera labels and snapshot timestamps identify the inputs. When a helper view is
-present, a short explanation identifies it as a wrist-mounted view of the same
-scene, useful for local contact/holding/release observations. It explains that
-the camera moves with the arm and that object visibility alone does not prove
-holding. Later action-evidence, idle and final-subtask instructions have been
-removed. Video uses Perception-LM-3B; images use Qwen3-VL-8B-Instruct. Current frame sampling,
+The video prompt asks PerceptionLM to describe observable movement and arm/object
+interactions, with frame-to-frame support for motion. It prohibits invented
+back-and-forth actions when the arm remains in place and distinguishes camera
+jitter from robot movement. The image prompt asks Qwen for detailed static scene
+and object descriptions; it explicitly says a still image cannot establish an
+action, temporal order, or success. Claude receives each caption's video/image
+role and combines temporal action evidence with static visual detail.
+Camera labels and snapshot timestamps identify the inputs. For PerceptionLM,
+the helper view is explained as a wrist-mounted view of the same scene that can
+show local contact/holding/release; the prompt also notes that camera motion
+alone does not prove object movement. For Qwen, the helper view is described
+only as a static second view at that instant. The previous-subtask caption
+option applies only to video captions; Qwen image descriptions remain
+independent of prior captions. Video uses
+Perception-LM-3B; images use Qwen3-VL-8B-Instruct. Current frame sampling,
 batching and hardware/timing reporting are retained. Use a new output directory
 for this prompt version; old run configurations cannot resume under it.
 
@@ -268,18 +287,20 @@ caches record quantization, and caption sidecars save it.
 ### Previous-subtask context
 
 Previous-subtask refinement is **off by default**. If explicitly enabled with
-`--previous-subtask-context`, annotation first generates independent captions, then refines only
-selected subtasks after the first using the immediately preceding selected
-subtask's **initial caption**. This snapshot keeps results independent of batch
-order and avoids feeding a chain of revised guesses into later captions. Only
-earlier, nonoverlapping subtasks in the same episode qualify. Earlier actions
-are context, not actions to repeat in the current description; current images
-take priority, and a preceding grasp is not assumed to persist.
+`--previous-subtask-context`, annotation first generates independent captions,
+then refines selected **video captions** after the first using the immediately
+preceding selected subtask's initial caption. It does not rerun Qwen image
+descriptions, which remain independent static descriptions. This snapshot keeps
+results independent of batch order and avoids feeding a chain of revised guesses
+into later captions. Only earlier, nonoverlapping subtasks in the same episode
+qualify. Earlier actions are context, not actions to repeat in the current
+description; a preceding grasp is not assumed to persist.
 
-This adds up to one caption request per selected subtask after the first, plus
-model loading/decoding for the extra passes. Fixed batch sizes still apply.
-Leave the flag off to use only the original neutral prompt. This
-requires a new annotation output directory because the prompt/config changed.
+This adds up to one video-caption request per eligible selected subtask after
+the first, plus model loading/decoding for the extra pass. Image descriptions
+are not rerun. Fixed batch sizes still apply.
+Leave the flag off to keep one independent video caption pass. The role-specific
+prompts and configuration change require a new annotation output directory.
 
 Initial captions remain in `node_captions/`; separate resumable results live in
 `context_captions/`. Episode exports, the viewer and Hub uploads use the refined

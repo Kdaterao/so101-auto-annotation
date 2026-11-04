@@ -27,7 +27,7 @@ class ModelInitializationError(RuntimeError):
     pass
 
 
-CAPTION_PROMPT_VERSION = "description-observed-motion-only-v26"
+CAPTION_PROMPT_VERSION = "split-temporal-actions-static-image-detail-v27"
 
 
 def build_parser():
@@ -63,6 +63,14 @@ def build_parser():
     p.add_argument("--window-stride", type=int, default=8)
     p.add_argument("--jepa-batch-size", type=int, default=1)
     p.add_argument("--min-duration", type=float, default=0.5)
+    p.add_argument("--gripper-event-segmentation", action=argparse.BooleanOptionalAction, default=True,
+                   help="Allow settled gripper open/close events to further split the selected JEPA cut")
+    p.add_argument("--gripper-min-subtask-duration", type=float, default=0.5,
+                   help="Minimum duration in seconds for both sides of a gripper-event split")
+    p.add_argument("--gripper-min-change-frac", type=float, default=0.25,
+                   help="Minimum settled gripper travel as a fraction of the episode range before an event is accepted")
+    p.add_argument("--gripper-min-change-abs", type=float, default=0.0,
+                   help="Additional minimum gripper travel in source state units")
     p.add_argument("--max-segments", type=int, default=8)
     p.add_argument("--silhouette-threshold", type=float, default=0.15)
     p.add_argument("--video-model", default="facebook/Perception-LM-3B")
@@ -141,7 +149,12 @@ def segment_episode(args, run, episode, source, worker):
                                    jepa=run["resolved"]["jepa"], checkpoint_url=JEPA_CHECKPOINT_URL,
                                    episode=episode, adapter="jepa-tubelet-amp-v3"))
     segment_key = fingerprint(dict(features=feature_key, min_duration=args.min_duration,
-                                   max_segments=args.max_segments, threshold=args.silhouette_threshold, version=SCHEMA_VERSION))
+                                   max_segments=args.max_segments, threshold=args.silhouette_threshold,
+                                   gripper_event_segmentation=args.gripper_event_segmentation,
+                                   gripper_min_subtask_duration=args.gripper_min_subtask_duration,
+                                   gripper_min_change_frac=args.gripper_min_change_frac,
+                                   gripper_min_change_abs=args.gripper_min_change_abs,
+                                   version=SCHEMA_VERSION))
     path = args.output_dir / "segments" / f"{prefix}.json"
     existing = cached_json(path, segment_key, args.resume)
     if existing:
@@ -186,17 +199,22 @@ def segment_episode(args, run, episode, source, worker):
             print(f"JEPA ep{episode}: windows {min(offset + len(batch), len(bank))}/{len(bank)}", flush=True)
         features, counts = average_observations(len(ids), observations, model.tubelet)
         encoder_seconds = perf_counter() - start
-        from robot101.data.utilities.stages import events_from_gripper_thresholds
-        gripper_events = events_from_gripper_thresholds(data["gripper"], fps=run["fps"], min_change_frac=0.25)
         metadata = dict(n_frames=data["n"], task=Counter(data["tasks"]).most_common(1)[0][0],
                         timestamps=data["timestamps"], gripper=data["gripper"].tolist(),
-                        gripper_events=gripper_events,
                         source_load_seconds=download_seconds, metadata_seconds=metadata_seconds,
                         decode_seconds=decode_seconds, encoder_seconds=encoder_seconds)
         save_features(feature_path, features, ids, counts, feature_key, metadata)
+    from robot101.data.utilities.stages import events_from_gripper_thresholds
+    gripper_events = events_from_gripper_thresholds(
+        np.asarray(metadata["gripper"], dtype=np.float32), fps=run["fps"],
+        min_change_frac=args.gripper_min_change_frac, min_change_abs=args.gripper_min_change_abs)
+    metadata["gripper_events"] = gripper_events
     start = perf_counter()
     tree = build_tree(features, ids, metadata["n_frames"], run["fps"], min_duration=args.min_duration,
                       max_segments=args.max_segments, threshold=args.silhouette_threshold)
+    if args.gripper_event_segmentation:
+        tree = add_gripper_event_subtasks(
+            tree, gripper_events, run["fps"], min_duration_seconds=args.gripper_min_subtask_duration)
     record = dict(tree, schema_version=SCHEMA_VERSION, fingerprint=segment_key,
                   jepa_checkpoint_url=JEPA_CHECKPOINT_URL,
                   feature_fingerprint=feature_key, episode_index=episode, camera=args.camera,
@@ -205,6 +223,62 @@ def segment_episode(args, run, episode, source, worker):
                   clustering_seconds=perf_counter() - start)
     atomic_json(path, record)
     return record
+
+
+def add_gripper_event_subtasks(tree, events, fps, *, min_duration_seconds=0.5):
+    """Add event-bounded controller subtasks without changing the JEPA tree.
+
+    The retained hierarchy remains the visual evidence tree. Synthetic selected
+    nodes represent additional controller intervals and point back to their
+    enclosing JEPA node with ``parent_node_id``.
+    """
+    if not np.isfinite(fps) or fps <= 0 or not np.isfinite(min_duration_seconds) or min_duration_seconds < 0:
+        raise ValueError("FPS must be positive and gripper minimum duration nonnegative")
+    lookup = {node["id"]: node for node in tree["nodes"]}
+    selected = sorted((lookup[node_id] for node_id in tree["selected_node_ids"]),
+                      key=lambda node: (node["start_frame"], node["end_frame"]))
+    min_frames = int(np.ceil(min_duration_seconds * fps))
+    synthetic, selected_ids, applied = [], [], []
+    next_id = 0
+    for parent in selected:
+        start, end = int(parent["start_frame"]), int(parent["end_frame"])
+        boundaries = []
+        cursor = start
+        for event in sorted(events, key=lambda row: int(row["frame"])):
+            frame = int(event["frame"])
+            if frame <= cursor or frame >= end:
+                continue
+            if frame - cursor < min_frames or end - frame < min_frames:
+                continue
+            boundaries.append((frame, str(event.get("type", "gripper_event"))))
+            cursor = frame
+        if not boundaries:
+            selected_ids.append(parent["id"])
+            continue
+        cuts = [start, *(frame for frame, _ in boundaries), end]
+        event_types = {frame: kind for frame, kind in boundaries}
+        for left, right in zip(cuts[:-1], cuts[1:], strict=True):
+            node_id = f"g{next_id:06d}"
+            next_id += 1
+            node = dict(
+                id=node_id, start_frame=left, end_frame=right, children=[], parent=None,
+                parent_node_id=parent["id"], controller_subtask=True,
+                segmentation_source="gripper_event", boundary_event=event_types.get(left),
+                caption_kind="video",
+            )
+            synthetic.append(node)
+            selected_ids.append(node_id)
+            if left in event_types:
+                applied.append(dict(parent_node_id=parent["id"], frame=left,
+                                    type=event_types[left], new_node_id=node_id))
+    tree["nodes"].extend(synthetic)
+    tree["selected_node_ids"] = selected_ids
+    tree["gripper_event_subtasks"] = dict(
+        enabled=True, min_duration_seconds=float(min_duration_seconds),
+        min_duration_frames=min_frames, applied_boundaries=applied,
+        synthetic_node_ids=[node["id"] for node in synthetic],
+    )
+    return tree
 
 
 @contextmanager
@@ -263,6 +337,10 @@ def caption_records(args, run, records, source, kind, worker_factory, previous_c
                         continue
                     previous_context = None
                     if previous_contexts is not None:
+                        # Keep Qwen's leaf-image captions strictly visual. Prior
+                        # subtask text is context for temporal video captions only.
+                        if kind != "video":
+                            continue
                         previous_context = previous_contexts.get((record["episode_index"], node["id"]))
                         if previous_context is None:
                             continue
@@ -473,7 +551,11 @@ def _run(args, usage):
                  "video_frames", "video_batch_size", "image_batch_size", "max_caption_tokens", "helper_event_frames"):
         if getattr(args, name) < 1:
             raise SystemExit(f"--{name.replace('_', '-')} must be positive")
-    if args.min_duration < 0 or not np.isfinite(args.min_duration) or not -1 <= args.silhouette_threshold <= 1:
+    if (args.min_duration < 0 or not np.isfinite(args.min_duration)
+            or args.gripper_min_subtask_duration < 0 or not np.isfinite(args.gripper_min_subtask_duration)
+            or not 0 < args.gripper_min_change_frac <= 1
+            or not np.isfinite(args.gripper_min_change_abs) or args.gripper_min_change_abs < 0
+            or not -1 <= args.silhouette_threshold <= 1):
         raise SystemExit("Invalid duration or silhouette threshold")
     if not np.isfinite(args.helper_event_window_seconds) or args.helper_event_window_seconds <= 0:
         raise SystemExit("--helper-event-window-seconds must be finite and positive")

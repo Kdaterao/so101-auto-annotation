@@ -1,4 +1,4 @@
-"""Full-episode POV masks with sparse Molmo gripper refreshes and recovery."""
+"""Full-episode POV masks seeded by Molmo and recovered from TAPIR tracks."""
 from pathlib import Path
 from time import perf_counter
 
@@ -9,7 +9,7 @@ from robot101.data.utilities.annotation_tree import atomic_json
 from robot101.perception.gripper_masks import BODY_PROMPT, NEGATIVE_PROMPT, valid_points, filter_candidates
 
 
-def prepare_episode_masks(frames, real, molmo, sam, root, episode, corrections, args, *, fps=30.0):
+def prepare_episode_masks(frames, real, molmo, tapir, sam, root, episode, corrections, args, *, fps=30.0):
     root = Path(root)
     directory, review = root / 'gripper_masks', root / 'mask_review'
     directory.mkdir(parents=True, exist_ok=True)
@@ -19,6 +19,8 @@ def prepare_episode_masks(frames, real, molmo, sam, root, episode, corrections, 
     refresh_fps = float(args.sam2_gripper_refresh_fps)
     if refresh_fps > fps:
         raise ValueError('POV gripper refresh FPS cannot exceed source FPS')
+    # Optional SAM re-anchors use tracked TAPIR points. Molmo is called only to
+    # initialize the episode (or when the initial query itself is unavailable).
     refresh_frames = (np.unique(np.rint(np.arange(0, len(frames), fps / refresh_fps)).astype(int))
                       if refresh_fps > 0 else np.asarray([], int))
     refresh_frames = refresh_frames[refresh_frames < len(frames)].tolist()
@@ -31,7 +33,52 @@ def prepare_episode_masks(frames, real, molmo, sam, root, episode, corrections, 
             if frame in manual and manual[frame] != value:
                 raise ValueError(f'Conflicting human POV corrections on frame {frame}')
             manual[frame] = value
-    prompts = []
+    prompts, track_banks = [], []
+
+    def cache_tapir_track(seed_frame, points):
+        seed_frame = int(seed_frame)
+        points = np.asarray(points, np.float32).reshape(-1, 2)
+        if not len(points):
+            raise ValueError('no_positive_gripper_points_for_tapir')
+        clip = frames[seed_frame:]
+        tracks, visible, _, _ = tapir.track_video(
+            clip, points, query_frame_index=0)
+        track_banks.append((seed_frame, points.copy(), tracks, visible))
+        return tracks, visible
+
+    def tracked_points(frame):
+        for seed_frame, _, tracks, visible in reversed(track_banks):
+            local = int(frame) - seed_frame
+            if not 0 <= local < tracks.shape[1]:
+                continue
+            xy = tracks[:, local]
+            keep = visible[:, local] & np.isfinite(xy).all(axis=1)
+            keep &= (xy[:, 0] >= 0) & (xy[:, 0] < w) & (xy[:, 1] >= 0) & (xy[:, 1] < h)
+            if keep.any():
+                return xy[keep].astype(np.float32)
+        return np.empty((0, 2), np.float32)
+
+    # Find one initial positive prompt set, then let TAPIR carry those points
+    # through the episode. No periodic Molmo calls are scheduled.
+    initial_seed = None
+    initial_points = np.empty((0, 2), np.float32)
+    for frame in np.flatnonzero(real)[:args.sam2_seed_search_frames]:
+        frame = int(frame)
+        if frame in manual:
+            value = manual[frame]
+            points = valid_points({'points_xy': value['points_xy']}, w, h)
+            if len(points) == len(value['points_xy']) and len(points):
+                initial_seed, initial_points = frame, points
+                break
+        print(f'  POV Molmo ep{episode}: initial gripper detection at frame {frame}', flush=True)
+        result = molmo.ground(frames[frame], BODY_PROMPT)
+        points = valid_points(result, w, h)
+        prompts.append(dict(frame=frame, role='gripper_body_initial', points_xy=points.tolist(), error=result.get('error')))
+        if len(points):
+            initial_seed, initial_points = frame, points
+            break
+    if initial_seed is not None:
+        cache_tapir_track(initial_seed, initial_points)
 
     def initialize(cursor):
         if cursor in manual:
@@ -39,23 +86,20 @@ def prepare_episode_masks(frames, real, molmo, sam, root, episode, corrections, 
             points = valid_points({'points_xy': value['points_xy']}, w, h)
             if len(points) != len(value['points_xy']):
                 raise ValueError('invalid_human_coordinates')
-            return cursor, points, value.get('labels', [1]*len(points)), True
-        for frame in np.flatnonzero(real[cursor:])[:args.sam2_seed_search_frames] + cursor:
-            frame = int(frame)
-            if frame in manual:
-                value = manual[frame]
-                points = valid_points({'points_xy': value['points_xy']}, w, h)
-                return frame, points, value.get('labels', [1]*len(points)), True
-            print(f'  POV Molmo ep{episode}: initialize/refresh/recover at frame {frame}', flush=True)
-            result = molmo.ground(frames[frame], BODY_PROMPT)
-            points = valid_points(result, w, h)
-            prompts.append(dict(frame=frame, role='gripper_body', points_xy=points.tolist(), error=result.get('error')))
-            if len(points):
-                return frame, points, [1]*len(points), False
-        raise ValueError('no_visible_gripper_body_points')
+            labels = np.asarray(value.get('labels', [1]*len(points)), np.int32)
+            if labels.shape != (len(points),) or not (labels == 1).any():
+                raise ValueError('human_correction_requires_positive_gripper_points')
+            cache_tapir_track(cursor, points[labels == 1])
+            return cursor, points, labels.tolist(), True
+        if initial_seed is not None and cursor <= initial_seed:
+            return initial_seed, initial_points, [1]*len(initial_points), False
+        points = tracked_points(cursor)
+        if len(points):
+            return int(cursor), points, [1]*len(points), False
+        raise ValueError('tapir_gripper_track_unavailable')
 
     def refine(frame, provisional, points, labels):
-        if not args.sam2_negative_prompts:
+        if not args.sam2_negative_prompts or frame != initial_seed:
             return points, labels
         image = frames[frame].copy()
         image[provisional] = (0.65*image[provisional] + 0.35*np.array([255, 0, 255])).astype(np.uint8)
@@ -113,7 +157,11 @@ def prepare_episode_masks(frames, real, molmo, sam, root, episode, corrections, 
         camera='wrist', episode=episode, window=[0, len(frames)-1],
         mask_file=path.relative_to(root).as_posix(), model=sam.model_id,
         mask_seconds=perf_counter()-started, valid_frame_count=int(valid.sum()),
-        gripper_refresh_fps=refresh_fps, scheduled_refresh_frames=refresh_frames,
+        tapir_reanchor_fps=refresh_fps, reanchor_source='tapir_track',
+        initial_localization_source='molmo_or_human_correction',
+        tapir_track_seeds=[dict(frame=int(seed), point_count=int(len(points)))
+                           for seed, points, _, _ in track_banks],
+        scheduled_tapir_reanchor_frames=refresh_frames.tolist(),
         episode_manual_review_required=not bool(valid.all()),
         events=events, prompts=prompts)
     for event in events:

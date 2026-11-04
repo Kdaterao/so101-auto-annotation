@@ -147,33 +147,35 @@ and gripper stage options.
 
 ### SAM mask spill checks
 
-By default, **POV-only** SAM 2 runs across the whole episode. Molmo initializes
-the mask at the beginning and refreshes gripper detections at **1 FPS**. Use
-`--sam2-gripper-refresh-fps 0.5` for one detection every two seconds, or `0` for
-initialization/recovery-only behavior. SAM propagates between refreshes. Each
-refresh uses the provisional-mask/negative-prompt refinement before propagation;
-this is sparse gripper detection, not video input to Molmo. Additional recovery
-attempts can occur when the mask is empty, excessive, grows suspiciously or fails
-validation. Scheduled refreshes do not consume the recovery budget. Annotation and
-grounding subtask boundaries do not independently trigger extra Molmo calls.
-Third-person grounding and its separate Molmo calls are unchanged.
+By default, **POV-only** SAM 2 runs across the whole episode. Molmo detects gripper
+body/finger points at initialization, then TAPIR tracks those points through the
+episode. SAM 2 propagates the mask between re-anchors. When SAM 2 loses or rejects
+the mask, the precomputed TAPIR point track re-seeds SAM 2 at that frame; Molmo is
+not called again for the gripper. If TAPIR also loses the gripper, the interval is
+left unresolved for human correction. The default `--sam2-gripper-refresh-fps 0`
+disables periodic re-anchoring. Set it above zero only when you want SAM 2
+periodically re-seeded from TAPIR points; `--sam2-tapir-reanchor-fps` is an alias.
+An initial provisional mask can still use one Molmo negative-object prompt to
+refine the gripper mask. Annotation and grounding subtask boundaries do not cause
+new Molmo gripper detections. Third-person grounding and its separate Molmo
+candidate detections are unchanged.
 
-Molmo searches the first three valid frames at initialization/recovery
-for positive gripper-body/finger points (`--sam2-seed-search-frames 3`). The first
-nonempty detection seeds SAM. SAM generates a provisional mask on that seed frame;
+Molmo searches the first three valid frames at initialization for positive
+gripper-body/finger points (`--sam2-seed-search-frames 3`). The first nonempty
+detection seeds TAPIR and SAM. SAM generates a provisional mask on that seed frame;
 only then does Molmo see a copied frame with the provisional mask in magenta and
 positive anchors in green, and request negative points inside nearby/held non-robot
-objects. The prompt explicitly states that the provisional mask can be wrong.
-SAM refines the same seed using all positive/negative points before propagating
-through the episode. Negative prompting is no longer batched alongside
-the initial gripper detections. Human correction prompts bypass automatic refinement.
+objects. That negative prompt is used only for the initial mask. The prompt states
+that the provisional mask can be wrong. Human correction prompts bypass automatic
+refinement and become a new TAPIR seed for subsequent frames.
 Clustering/filter statistics still use only each grounding interval's tail window
 and extension, sliced from the shared episode masks.
 
-`--sam2-max-recoveries 5` permits five automatic recoveries after initialization.
-If reinitialization fails, `--sam2-recovery-retry-frames 30` prevents trying Molmo
-on every subsequent frame. Unresolved frames require human correction; missing
-camera frames are never filled with a fabricated mask. These checks cannot
+`--sam2-max-recoveries 5` permits five automatic SAM recoveries after initialization.
+If reinitialization fails, `--sam2-recovery-retry-frames 30` spaces out retries;
+each retry uses TAPIR coordinates at that exact frame. Unresolved frames require
+human correction; missing camera frames are never filled with a fabricated mask.
+These checks cannot
 detect every semantic segmentation mistake. Review full-episode previews before
 large runs; full decoding/propagation adds CPU memory and compute.
 
@@ -181,8 +183,15 @@ Full masks, per-frame validity and recovery events are saved in
 `point_tracks/gripper_masks/epNNNNNN_full.npz` and its JSON sidecar. Both viewers
 can show full-episode masks; rejected masks are marked for review. Human recovery
 items use keys like `10:frame:123` with the existing correction tool. Corrected
-frames reinitialize SAM at that exact time. `--no-sam2-full-episode` restores the
-earlier window-based path. Use a fresh destination when changing this policy.
+frames reinitialize SAM at that exact time. POV SAM filtering requires
+full-episode mode. `--no-sam2-full-episode` is rejected while
+`--pov-gripper-filter` is enabled, so preprocessing cannot silently fall back to
+separate Molmo detections for each stage window. Molmo searches only the first
+configured valid episode frames for initial gripper points; TAPIR then tracks
+them through the episode and supplies later SAM re-seed coordinates. If initial
+localization fails, or TAPIR later loses the gripper, the episode requires human
+review. Use `--no-pov-gripper-filter` to disable POV SAM filtering and this
+gripper-localization path. Use a fresh destination when changing this policy.
 
 The provisional seed mask/preview is saved for inspection. If the negative request
 fails, only that provisional frame is available and is labeled for review; it is

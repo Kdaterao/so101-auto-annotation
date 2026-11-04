@@ -156,27 +156,33 @@ class Captioner:
     def caption(self, requests, max_tokens=1024):
         conversations, flat_views, helper_images = [], [], []
         for request in requests:
-            # Original neutral caption instruction, before later robotics prompt revisions.
-            prompt = "Describe this video in detail." if self.kind == "video" else "Describe this image in detail."
             if self.kind == "video":
-                prompt += (
-                    " Describe robot movement only when visible changes across frames support it. "
+                prompt = (
+                    "Describe the motion and actions visible in this video segment in detail. "
+                    "Follow how the robotic arm and scene objects change across the sampled frames. "
+                    "Describe the arm's movement relative to objects, visible contact, grasping, "
+                    "holding, moving objects and releasing them when observable. The arm may hold "
+                    "or wield a tool that interacts with another object; distinguish a held tool "
+                    "from its target and describe their visible interaction without assuming tool use. "
+                    "Use only temporal changes supported by the video frames. Robot movement should "
+                    "be described only when visible changes across frames support it. "
                     "If the arm remains in the same position, describe it as remaining in place; do not "
                     "invent back-and-forth motion or an action sequence. Small finger or object changes "
                     "can still occur without arm movement. Distinguish robot movement from camera motion "
                     "or image jitter, and do not infer whole-clip stillness from a single unchanged frame."
                 )
-            prompt += (
-                " Focus on how the robotic arm interacts with objects in the scene: its movement "
-                "relative to them, visible contact, grasping, holding, moving objects and releasing them, "
-                "when these are observable. Describe the visible interaction rather than only listing "
-                "objects or describing the arm's posture. The arm may hold or wield a tool that interacts "
-                "with another object; interaction does not require direct contact between the gripper "
-                "fingers and the target. When visible, distinguish the held tool from the target object "
-                "and describe how the tool contacts or affects the target. Do not assume every held "
-                "object is a tool or invent tool use that is not visually supported."
-            )
-            previous = request.get("previous_subtask")
+            else:
+                prompt = (
+                    "Describe this image in detailed visual terms. Identify visible objects and their "
+                    "appearance, colors, shapes, positions, spatial relationships, the scene, and the "
+                    "robot gripper's visible posture or current spatial relation to objects. Be specific "
+                    "about what is present in this still image. Do not describe motion, actions, attempts, "
+                    "temporal order, grasping or releasing as events, or task success: a still image "
+                    "cannot establish what happened before or after it. Do not infer that an object is "
+                    "held merely because it is near or between the gripper. If multiple camera images are "
+                    "provided, describe their visible spatial details without inferring changes between them."
+                )
+            previous = request.get("previous_subtask") if self.kind == "video" else None
             if previous is not None:
                 prompt += (
                     "\nThe JSON below is an earlier model's initial caption of the immediately preceding "
@@ -189,7 +195,8 @@ class Captioner:
                     + json.dumps(previous) + "\n"
                 )
             views = request.get("views") or [dict(camera="primary", role="primary", frames=request["frames"])]
-            if request.get("episode_has_no_pov") and not any(view.get("role") == "helper" for view in views):
+            if (self.kind == "video" and request.get("episode_has_no_pov")
+                    and not any(view.get("role") == "helper" for view in views)):
                 prompt += (
                     "\nThis episode has no available wrist/POV view. Use the third-person view alone to "
                     "assess how the gripper interacts with scene objects, including visible contact, "
@@ -198,16 +205,24 @@ class Captioner:
                     "occlusion or insufficient detail rather than inventing them."
                 )
             if any(view.get("role") == "helper" for view in views):
-                prompt += (
-                    "\nThe helper POV is a wrist-mounted camera looking toward the robot's gripper. "
-                    "It shows the same scene as the primary third-person camera from a close viewpoint, "
-                    "not a separate episode. Use it to see local interaction: the fingers, nearby objects, "
-                    "contact, an object held between the fingers, or separation during release. Its camera "
-                    "moves with the arm, so image motion alone does not establish object movement. "
-                    "Use the third-person view for overall movement through the scene. Timestamped POV "
-                    "snapshots are sparse observations, not a continuous video; their times locate them "
-                    "within the current clip. An object merely visible in the POV is not necessarily held."
-                )
+                if self.kind == "video":
+                    prompt += (
+                        "\nThe helper POV is a wrist-mounted camera looking toward the robot's gripper. "
+                        "It shows the same scene as the primary third-person camera from a close viewpoint, "
+                        "not a separate episode. Use it to see local interaction: the fingers, nearby objects, "
+                        "contact, an object held between the fingers, or separation during release. Its camera "
+                        "moves with the arm, so image motion alone does not establish object movement. "
+                        "Use the third-person view for overall movement through the scene. Timestamped POV "
+                        "snapshots are sparse observations, not a continuous video; their times locate them "
+                        "within the current clip. An object merely visible in the POV is not necessarily held."
+                    )
+                else:
+                    prompt += (
+                        "\nThe helper POV is a wrist-mounted camera looking toward the same scene from "
+                        "near the gripper. Describe only the static appearance and spatial relationships "
+                        "visible in that image at this instant. It is a second view of the same scene, not "
+                        "evidence of movement, temporal order, grasping or release."
+                    )
             content = [{"type": "text", "text": prompt}]
             for view in views:
                 if view.get("media_kind") == "image_sequence":

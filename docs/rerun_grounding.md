@@ -131,7 +131,7 @@ python -m robot101.data.preprocess \
   --annotation-stage captioning --annotation-text caption \
   --episodes "$TEST_EPISODE" \
   --grounding-gripper-subdivision \
-  --sam2-full-episode --sam2-gripper-refresh-fps 1 \
+  --sam2-full-episode \
   --dst-repo-id "${GROUNDING_REPO}_smoke" \
   --dry-run
 ```
@@ -145,8 +145,9 @@ not validate tracking or SAM masks. The new GPU path still needs this inspection
 ## 4. Rerun all available episodes on each VM
 
 Production settings match the spread-out smoke run: full-episode POV masks,
-1 FPS Molmo refreshes, relaxed negative-point conflict/inclusion checks, and
-stationary third-person endpoint goals. Other mask validity checks still apply.
+one initial Molmo gripper localization followed by TAPIR tracking, relaxed
+negative-point conflict/inclusion checks, and stationary third-person endpoint
+goals. Other mask validity checks still apply.
 Do not include smoke outputs in the final combination; these workers process
 their complete available annotation selections into fresh `v3` destinations.
 
@@ -156,7 +157,7 @@ python -m robot101.data.preprocess \
   --annotation-revision "$ANNOTATION_REVISION" \
   --annotation-stage captioning --annotation-text caption \
   --grounding-gripper-subdivision \
-  --sam2-full-episode --sam2-gripper-refresh-fps 1 \
+  --sam2-full-episode \
   --tapir-frame-batch-size 256 \
   --dst-repo-id "$GROUNDING_REPO" \
   --resume --push-to-hub
@@ -169,13 +170,17 @@ recover missing annotation episodes or guarantee all 73 planned episodes exist.
 
 The new grounding flag is on by default and is explicit above for clarity.
 POV SAM masks now propagate across the full episode by default
-(`--sam2-full-episode`). Molmo refreshes the POV gripper at 1 FPS by default;
-use `--sam2-gripper-refresh-fps 0.5` for every two seconds, or `0` for only
-initialization/loss recovery. Refreshes do not follow subtask boundaries. Third-person
-behavior is unchanged. Use a new destination if the previous run used masks only
-in clustering windows. Clustering itself still uses those windows. Recovery
-defaults: five automatic recoveries, with a 30-frame gap after a failed retry;
-unresolved masks are queued for human correction.
+(`--sam2-full-episode`). Molmo localizes the POV gripper once near episode start;
+TAPIR tracks those points through the episode and supplies coordinates when SAM 2
+needs to reinitialize after mask loss. Molmo still provides the initial
+object-negative prompt when enabled. Optional periodic SAM 2 re-anchoring from
+TAPIR can be enabled with `--sam2-tapir-reanchor-fps`; the default `0` only
+reinitializes after mask loss. Subtask boundaries do not cause new Molmo calls.
+Third-person behavior is unchanged. Use a new destination when switching from
+the previous repeated-Molmo refresh policy. Clustering still uses its tail
+windows. Recovery defaults: five automatic recoveries, with a 30-frame gap after
+a failed retry; if TAPIR has also lost the gripper, unresolved masks are queued
+for human correction.
 It reuses the existing movement-based open/close detector and settings, including
 `--gripper-min-change-frac 0.25` and `--min-stage-frames 1`. Detected events split
 point computation inside each parent annotation interval; no interval crosses a
