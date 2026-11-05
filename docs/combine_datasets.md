@@ -114,13 +114,19 @@ original artifacts; the combiner does not assign a replacement license.
 .venv-viewer/bin/python -m streamlit run scripts/view_combined_dataset.py
 ```
 
-The page contains only a **Source episode** selector and the top/wrist playback
-videos with Claude's revised caption above each. Every source episode is listed
+The page contains only a **Source episode** selector, one final annotation above
+the top/wrist playback videos, and shared playback controls. The annotation uses
+Claude's `brief_caption` (or `brief_action`), with a detailed final field as a
+fallback for older datasets. Original model captions, duplicate descriptions,
+review diagnostics and preview debug labels are not displayed. If aggregation
+is missing, the page says so rather than substituting an original model caption.
+Every source episode is listed
 by default; no pagination or review filter hides episodes. The selector loads
 joined JSON metadata, not all videos. Only the selected episode's videos and
 masks are fetched. Playback runs across the whole episode, updating the caption
 at subtask boundaries. Masks and visible grounding dots are rendered in cached
-H.264 previews; stored videos stay unchanged. Camera players are independent.
+H.264 previews; stored videos stay unchanged. Both cameras must finish loading
+before playback starts, and share a synchronized timeline for play/pause/seeking.
 SAM masks are hidden by default and previous-interval cyan dots display for
 0.5 seconds. Add `--transition-display-seconds N` after the launch command's `--`
 to change this display duration, or `--show-masks` to show SAM masks again.

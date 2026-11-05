@@ -123,21 +123,31 @@ def playback_clip(path, file_stamp, offset, fps, start, end, camera, render_key,
     return buffer.getvalue()
 
 
+def final_annotation_text(record):
+    """Show one final action description; never substitute a raw model caption."""
+    for field in ("brief_caption", "brief_action", "detailed_caption", "detailed_action"):
+        text = record.get(field)
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+    return "Final annotation unavailable"
+
+
 def episode_player(clips, records, fps, selected_start):
     """One browser component owns both cameras and their shared playback clock."""
     import streamlit.components.v1 as components
     timeline = [dict(start=r["start_frame"], end=r["end_frame"],
-                     caption=r.get("detailed_caption") or r.get("brief_caption") or "No revised caption available") for r in records]
+                     caption=final_annotation_text(r)) for r in records]
     sources = [dict(name=camera, src="data:video/mp4;base64," + base64.b64encode(clip).decode("ascii"))
                for camera, clip in clips]
     html = r'''<!doctype html><meta charset="utf-8">
 <style>body{font:15px system-ui;margin:0;color:#ddd;background:#0e1117}
 #grid{display:grid;grid-template-columns:repeat(CAMERA_COUNT,minmax(0,1fr));gap:16px}
-.caption{height:150px;overflow:auto;padding:10px;background:#1c2230;border-radius:6px;margin-bottom:8px;white-space:pre-wrap}
+#annotation{min-height:2.5em;line-height:1.5;padding:10px;background:#1c2230;border-radius:6px;margin-bottom:12px;white-space:pre-wrap}
 video{width:100%;display:block;background:black}#controls{display:flex;gap:12px;align-items:center;margin-top:12px}
 button{padding:8px 18px;background:#263248;color:white;border:1px solid #64748b;border-radius:5px;cursor:pointer}
 input{flex:1;min-width:40px}#status{font-size:13px;margin-top:8px;color:#cbd5e1}
-@media(max-width:650px){#grid{grid-template-columns:1fr}.caption{height:100px}}</style>
+@media(max-width:650px){#grid{grid-template-columns:1fr}}</style>
+<div id="annotation" aria-label="Final annotation">Loading final annotation…</div>
 <div id="grid"></div><div id="controls"><button id="play" disabled>Loading…</button>
 <input id="seek" type="range" min="0" value="0" max="1" step="1" disabled aria-label="Shared episode timeline">
 <span id="time">0:00 / 0:00</span></div><div id="status">Loading both camera videos…</div>
@@ -145,10 +155,10 @@ input{flex:1;min-width:40px}#status{font-size:13px;margin-top:8px;color:#cbd5e1}
 const timeline=TIMELINE_DATA,sources=SOURCES_DATA,fps=FPS_DATA;
 const grid=document.getElementById('grid'),button=document.getElementById('play'),slider=document.getElementById('seek'),status=document.getElementById('status');
 let ready=false,wantsPlay=false,starting=false,seeking=false,scrubbing=false,serial=0,duration=0,lastCaption=-2;
-const videos=[],captions=[];
+const videos=[];
 function pauseAll(){videos.forEach(v=>{v.pause();v.playbackRate=1});}
 function clock(t){const s=Math.max(0,Math.floor(t));return `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`;}
-function captionAt(t){const f=Math.floor(t*fps+1e-5),i=timeline.findIndex(s=>f>=s.start&&f<s.end);if(i===lastCaption)return;lastCaption=i;captions.forEach(c=>c.textContent=timeline[i]?.caption||'No revised caption at this time');}
+function captionAt(t){const f=Math.floor(t*fps+1e-5),i=timeline.findIndex(s=>f>=s.start&&f<s.end);if(i===lastCaption)return;lastCaption=i;document.getElementById('annotation').textContent=timeline[i]?.caption||'Final annotation unavailable';}
 function display(t){captionAt(t);if(!scrubbing)slider.value=Math.round(t*fps);document.getElementById('time').textContent=`${clock(t)} / ${clock(duration)}`;button.textContent=wantsPlay?'Pause':'Play';}
 function fail(message){wantsPlay=false;pauseAll();button.disabled=true;slider.disabled=true;status.textContent=message;}
 function buffered(){return videos.every(v=>v.readyState>=3&&!v.seeking);}
@@ -162,9 +172,9 @@ async function seekAll(t){const request=++serial;seeking=true;pauseAll();t=Math.
 try{await Promise.all(videos.map(v=>setPosition(v,t)));if(request!==serial)return;seeking=false;display(t);await playAll();}
 catch(e){if(request===serial){seeking=false;fail(e.message);}}}
 const loaders=sources.map(source=>new Promise((resolve,reject)=>{
-const pane=document.createElement('div'),caption=document.createElement('div'),video=document.createElement('video');caption.className='caption';caption.textContent='Loading revised caption…';
+const pane=document.createElement('div'),video=document.createElement('video');
 video.muted=true;video.playsInline=true;video.preload='auto';video.setAttribute('aria-label',source.name+' camera');
-pane.append(caption,video);grid.append(pane);captions.push(caption);videos.push(video);
+pane.append(video);grid.append(pane);videos.push(video);
 let loaded=false;function check(){if(!loaded&&video.readyState>=4){loaded=true;resolve();}if(ready)playAll();}
 video.addEventListener('canplaythrough',check);video.addEventListener('canplay',check);video.addEventListener('seeked',()=>{if(ready&&!seeking)playAll();});
 video.addEventListener('waiting',()=>{if(ready&&wantsPlay){pauseAll();status.textContent='Buffering: both cameras paused…';}});
@@ -184,7 +194,7 @@ display(t);}requestAnimationFrame(tick);}tick();
             .replace("SOURCES_DATA", json.dumps(sources).replace("<", "\\u003c"))
             .replace("FPS_DATA", str(float(fps))).replace("START_DATA", str(int(selected_start)))
             .replace("CAMERA_COUNT", str(len(clips))))
-    components.html(html, height=760, scrolling=True)
+    components.html(html, height=650, scrolling=True)
 
 
 def main():
@@ -229,6 +239,7 @@ def main():
             return
         renderer = None
         render_hash = hashlib.sha256(json.dumps(report, sort_keys=True).encode())
+        render_hash.update(b"combined-final-annotation-v2:no-debug-labels")
         render_hash.update(f"{args.show_masks}:{args.transition_display_seconds}".encode())
         if not report.get("debug_overlays", False):
             from robot101.data.utilities.debug_overlays import DebugOverlayRenderer
@@ -248,7 +259,8 @@ def main():
                         shutil.copy2(source, target)
                         render_hash.update(source.read_bytes())
                 renderer = DebugOverlayRenderer(report["subtasks"], Path(directory),
-                    show_masks=args.show_masks, transition_seconds=args.transition_display_seconds, fps=fps)
+                    show_masks=args.show_masks, show_labels=False,
+                    transition_seconds=args.transition_display_seconds, fps=fps)
         if report.get("debug_overlays", False):
             st.warning("This source video already contains overlays; baked-in masks and points cannot be removed by viewer settings.")
         chosen = [camera for camera in ("top", "wrist") if camera in cameras]

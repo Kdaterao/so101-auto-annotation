@@ -69,6 +69,7 @@
 #| anthropic>=0.125,<1
 
 # [profile:viewer]
+#| av>=15,<17
 #| datasets>=3,<5
 #| huggingface-hub>=0.34,<2
 #| Pillow>=10

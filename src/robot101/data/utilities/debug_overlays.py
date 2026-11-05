@@ -21,9 +21,10 @@ def write_output_mode(root, debug):
 
 
 class DebugOverlayRenderer:
-    def __init__(self, records, sidecar_root, *, show_masks=True, transition_seconds=None, fps=None):
+    def __init__(self, records, sidecar_root, *, show_masks=True, show_labels=True, transition_seconds=None, fps=None):
         self.records = records
         self.show_masks = show_masks
+        self.show_labels = show_labels
         self.transition_frames = (max(0, round(transition_seconds * fps))
                                   if transition_seconds is not None and fps is not None else None)
         self.masks = []
@@ -95,7 +96,8 @@ class DebugOverlayRenderer:
         if self.transition_frames is None or offset < self.transition_frames:
             self._dots(image, previous, offset, (0, 255, 255))
         self._dots(image, result, offset, (0, 255, 0))
-        text = f"DEBUG subtask {current['subtask']} {result.get('source', 'none')} {status}"
-        cv2.putText(image, text, (8, 22), cv2.FONT_HERSHEY_SIMPLEX, .45, (0, 0, 0), 3)
-        cv2.putText(image, text, (8, 22), cv2.FONT_HERSHEY_SIMPLEX, .45, (255, 255, 255), 1)
+        if self.show_labels:
+            text = f"DEBUG subtask {current['subtask']} {result.get('source', 'none')} {status}"
+            cv2.putText(image, text, (8, 22), cv2.FONT_HERSHEY_SIMPLEX, .45, (0, 0, 0), 3)
+            cv2.putText(image, text, (8, 22), cv2.FONT_HERSHEY_SIMPLEX, .45, (255, 255, 255), 1)
         return image
