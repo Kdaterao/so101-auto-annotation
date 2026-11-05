@@ -161,7 +161,7 @@ def prepare_episode_masks(frames, real, molmo, tapir, sam, root, episode, correc
         initial_localization_source='molmo_or_human_correction',
         tapir_track_seeds=[dict(frame=int(seed), point_count=int(len(points)))
                            for seed, points, _, _ in track_banks],
-        scheduled_tapir_reanchor_frames=refresh_frames.tolist(),
+        scheduled_tapir_reanchor_frames=refresh_frames,
         episode_manual_review_required=not bool(valid.all()),
         events=events, prompts=prompts)
     for event in events:
