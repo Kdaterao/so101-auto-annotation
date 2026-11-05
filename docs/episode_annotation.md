@@ -45,6 +45,12 @@ source .venv-annotation/bin/activate
 hf auth login
 ```
 
+The installer registers this checkout's `robot101` package in `.venv-annotation`
+and checks imports outside the repository, real CUDA operations, CLI startup,
+and CPU video decoding before reporting success. It is safe to rerun to repair
+an existing environment. To verify without reinstalling, run
+`bash scripts/setup/linux_setup.sh --profile annotation --check`.
+
 Video captions default to [Perception-LM-3B](https://huggingface.co/facebook/Perception-LM-3B);
 image captions use [Qwen3-VL-8B-Instruct](https://huggingface.co/Qwen/Qwen3-VL-8B-Instruct).
 Use a new output directory when switching models; existing run configurations

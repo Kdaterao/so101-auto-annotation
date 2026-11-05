@@ -19,13 +19,29 @@ source .venv-annotation/bin/activate
 hf auth login
 ```
 
+Setup uses this standalone repository's `src/robot101` package and installs it
+into `.venv-annotation`. It verifies imports outside the checkout, a CUDA tensor
+operation, both annotation CLIs, and a small PyAV/TorchCodec video round trip.
+It prints **Setup verified** only after these checks pass. Re-running the same
+setup command repairs an existing environment; activating a venv by itself does
+not install the project. You can rerun only the checks with:
+
+```bash
+bash scripts/setup/linux_setup.sh --profile annotation --check
+```
+
+Python 3.12 is provided by `uv`; it does not need a matching Ubuntu apt package.
+Use `SKIP_APT=1 bash scripts/setup/linux_setup.sh --profile annotation` only when
+the system packages are already installed. If setup fails, it names the failing
+step; fix that error and rerun before starting annotation.
+
 Use an account with access to the Perception-LM-3B model. If the run will publish
 artifacts, the Hugging Face account also needs write access to the destination
 dataset. Start a persistent terminal before a long job if you may disconnect:
 
 ```bash
 tmux new -s captions
-cd ~/robot101
+cd ~/so101-auto-annotation
 source .venv-annotation/bin/activate
 ```
 

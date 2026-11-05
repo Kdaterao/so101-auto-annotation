@@ -1,30 +1,36 @@
 #!/usr/bin/env bash
-# Ubuntu environment setup. Processing/training commands live in docs/.
-set -euo pipefail
+# Ubuntu GPU setup. Jobs and model downloads are run separately; see docs/.
+set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 PROFILE=grounded
+CHECK_ONLY=0
+STEP='argument validation'
+trap 'status=$?; printf "\nSetup failed during %s (profile=%s, line=%s, exit=%s).\nFix the error above, then rerun the same setup command.\n" "$STEP" "$PROFILE" "$LINENO" "$status" >&2; exit "$status"' ERR
+
 usage() {
   cat <<'HELP'
-Usage: bash scripts/setup/linux_setup.sh [--profile grounded|molmo2|annotation|robot|all]
+Usage: bash scripts/setup/linux_setup.sh [--profile grounded|molmo2|annotation|robot|all] [--check]
 
-  grounded  Molmo2 inference + TAPIR + video preprocessing (default; .venv-grounded)
-  molmo2    Molmo2 connector training dependencies (.venv-molmo2)
-  robot     Robot control and SmolVLA dependencies (.venv)
-  annotation V-JEPA 2.1 + Qwen video/image captions + Claude aggregation (.venv-annotation)
-  all       Prepare all four isolated environments
+  annotation  Segmentation + PerceptionLM/Qwen captions + Claude (.venv-annotation)
+  grounded    Molmo2 inference + TAPIR + SAM 2 (.venv-grounded; default)
+  molmo2      Molmo2 connector training (.venv-molmo2)
+  robot       LeRobot control/training (.venv)
+  all         Set up and verify all four isolated environments
+  --check     Verify existing environments without installing packages
 
-Set SKIP_APT=1 to skip Ubuntu system packages when already installed.
-Model checkpoint downloads and job execution are documented in docs/.
+SKIP_APT=1 skips Ubuntu system packages if they are already installed.
+TORCH_INDEX_URL may override the default https://download.pytorch.org/whl/cu130.
+Requires an NVIDIA driver compatible with the selected PyTorch CUDA wheel.
+Setup does not download model checkpoints, launch jobs, or request HF/API tokens.
 HELP
 }
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --profile)
       [[ $# -ge 2 ]] || { usage >&2; exit 2; }
-      PROFILE="$2"
-      shift 2
-      ;;
+      PROFILE="$2"; shift 2 ;;
+    --check) CHECK_ONLY=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -34,161 +40,146 @@ case "$PROFILE" in
   *) echo "Unknown profile: $PROFILE" >&2; usage >&2; exit 2 ;;
 esac
 if [[ "$(uname -s)" != Linux ]]; then
-  echo 'Use scripts/setup/windows_setup.ps1 on Windows.' >&2
+  echo 'This installer requires Linux. Use scripts/setup/windows_setup.ps1 on Windows.' >&2
   exit 2
 fi
-if [[ "${SKIP_APT:-0}" != 1 ]]; then
-  if ! command -v apt-get >/dev/null 2>&1; then
-    echo 'This installer targets Ubuntu. Install system dependencies and set SKIP_APT=1.' >&2
-    exit 2
+# Detect a broken requirements catalog before installing anything.
+for selected in annotation grounded molmo2 robot; do
+  if [[ "$PROFILE" == all || "$PROFILE" == "$selected" ]]; then
+    if ! grep -Fqx "# [profile:${selected}]" requirements.txt; then
+      echo "Missing requirements profile '${selected}'. Update this standalone checkout's requirements.txt and installer together." >&2
+      exit 2
+    fi
   fi
-  sudo apt-get update -y
-  sudo apt-get install -y git curl ca-certificates ffmpeg tmux python3.12 \
-    python3.12-venv python3.12-dev python3-tk build-essential
-fi
-if ! command -v uv >/dev/null 2>&1; then
-  curl --fail --location --silent --show-error https://astral.sh/uv/install.sh | sh
-  export PATH="${HOME}/.local/bin:${PATH}"
+done
+
+if [[ "$CHECK_ONLY" == 0 ]]; then
+  STEP='NVIDIA driver check'
+  if ! command -v nvidia-smi >/dev/null 2>&1; then
+    echo 'nvidia-smi is missing. Install/enable the VM NVIDIA driver first.' >&2
+    exit 1
+  fi
+  nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
+  STEP='Ubuntu system packages'
+  if [[ "${SKIP_APT:-0}" != 1 ]]; then
+    command -v apt-get >/dev/null || { echo 'Install system packages and set SKIP_APT=1 on non-Ubuntu Linux.' >&2; exit 2; }
+    SUDO=()
+    if [[ "$EUID" != 0 ]]; then
+      command -v sudo >/dev/null || { echo 'sudo is required to install system packages; or set SKIP_APT=1.' >&2; exit 2; }
+      SUDO=(sudo)
+    fi
+    "${SUDO[@]}" apt-get update
+    # uv supplies Python 3.12, including on Ubuntu versions without python3.12 apt packages.
+    "${SUDO[@]}" apt-get install -y git curl ca-certificates ffmpeg tmux build-essential pkg-config
+  fi
+  for executable in git curl ffmpeg; do
+    command -v "$executable" >/dev/null || { echo "Missing $executable; install system packages first." >&2; exit 2; }
+  done
+  STEP='uv installation'
+  if ! command -v uv >/dev/null 2>&1; then
+    export PATH="${HOME}/.local/bin:${PATH}"
+    if ! command -v uv >/dev/null 2>&1; then
+      curl --fail --location --silent --show-error https://astral.sh/uv/install.sh | sh
+    fi
+  fi
+  command -v uv >/dev/null
 fi
 
-setup_grounded() {
-git submodule update --init tapnet lerobot
-ENV_DIR="${ROOT}/.venv-grounded"
-if [[ ! -x "$ENV_DIR/bin/python" ]]; then
-  uv venv --seed --python 3.12 "$ENV_DIR"
-fi
-uv pip install --python "$ENV_DIR/bin/python" torch==2.10.0 torchvision==0.25.0 \
-  --index-url https://download.pytorch.org/whl/cu130
-# SAM inference uses CUDA Torch; its optional cleanup extension needs nvcc.
-SAM2_BUILD_CUDA=0 "$ENV_DIR/bin/python" scripts/install_requirements.py --profile grounded \
-  --installer uv --pin torch==2.10.0 --pin torchvision==0.25.0
-# Match Torch 2.10; CPU decoding avoids CUDA NPP library requirements.
-uv pip install --python "$ENV_DIR/bin/python" --no-deps torchcodec==0.10.0 \
-  --index-url https://download.pytorch.org/whl/cpu
-# Only the PyTorch TAPIR path is used; do not install its JAX training stack.
-uv pip install --python "$ENV_DIR/bin/python" --no-deps -e ./tapnet
-"$ENV_DIR/bin/python" -m spacy download en_core_web_sm
-export PYTHONPATH="$ROOT/src:$ROOT/lerobot/src:${PYTHONPATH:-}"
-"$ENV_DIR/bin/python" - <<'PY'
-import torch
-import spacy
-import einshape
-import einops
-from robot101.data.utilities.episode_helpers import _load_lerobot
-from robot101.perception.molmo2 import Molmo2Worker
-from robot101.perception.tracking import BootsTAPIR
-from sam2.sam2_video_predictor import SAM2VideoPredictor
-_load_lerobot()
-spacy.load('en_core_web_sm')
-if not torch.cuda.is_available():
-    raise SystemExit('CUDA unavailable: check the VM NVIDIA driver.')
-print('Ready for preprocessing on', torch.cuda.get_device_name(0))
+prepare_submodule() {
+  local name="$1"
+  STEP="${name} submodule"
+  git submodule update --init --recursive "$name"
+  [[ -f "$ROOT/$name/pyproject.toml" || -f "$ROOT/$name/setup.py" ]] || {
+    echo "Submodule $name has no Python project metadata. Check the submodule checkout." >&2; exit 1;
+  }
+}
+
+prepare_environment() {
+  STEP="${PROFILE} virtual environment"
+  if [[ ! -x "$ENV_DIR/bin/python" ]]; then
+    uv venv --seed --python 3.12 "$ENV_DIR"
+  fi
+  "$ENV_DIR/bin/python" -I - "$ENV_DIR" <<'PY'
+from pathlib import Path
+import sys
+if sys.version_info[:2] != (3, 12) or Path(sys.prefix).resolve() != Path(sys.argv[1]).resolve():
+    raise SystemExit(f'Expected a Python 3.12 venv at {sys.argv[1]}; move the incompatible venv aside and rerun setup.')
+(Path(sys.prefix) / '.setup-ready.json').unlink(missing_ok=True)
+print('Installing into:', sys.executable, flush=True)
 PY
-echo 'Next: source .venv-grounded/bin/activate && hf auth login'
-echo 'Run commands: docs/preprocessing.md'
-}
-
-setup_molmo2() {
-if [[ ! -x "${ROOT}/.venv-molmo2/bin/python" ]]; then
-  uv venv --seed --python 3.12 "${ROOT}/.venv-molmo2"
-fi
-
-VENV_PYTHON="${ROOT}/.venv-molmo2/bin/python"
-uv pip install --python "${VENV_PYTHON}" pip
-MOLMO2_WORK="${SO101_MOLMO2_WORKDIR:-${ROOT}/molmo2_so101_run}"
-MOLMO2_REPO="${MOLMO2_REPO_ROOT:-${MOLMO2_WORK}/molmo2}"
-MOLMO2_REF="${SO101_MOLMO2_REF:-f3cb1085fbb97c4a4d7fdcadd77cf871bf37a88a}"
-
-if [[ ! -f "${MOLMO2_REPO}/launch_scripts/sft.py" ]]; then
-  mkdir -p "$(dirname "${MOLMO2_REPO}")"
-  git clone --depth 1 https://github.com/allenai/molmo2.git "${MOLMO2_REPO}"
-  git -C "${MOLMO2_REPO}" fetch --depth 1 origin "${MOLMO2_REF}"
-  git -C "${MOLMO2_REPO}" checkout --detach FETCH_HEAD
-fi
-
-echo "Installing CUDA 13.0 PyTorch for the RTX A6000..."
-uv pip install --python "${VENV_PYTHON}" \
-  torch==2.10.0 torchvision==0.25.0 \
-  --index-url https://download.pytorch.org/whl/cu130
-
-# Molmo2 SO-101 training uses images only. CPU TorchCodec avoids CUDA NPP
-# runtime-library requirements while retaining FFmpeg-backed CPU decoding.
-uv pip install --python "${VENV_PYTHON}" --reinstall --no-deps \
-  torchcodec==0.12.0 --index-url https://download.pytorch.org/whl/cpu
-
-echo "Installing the pinned Molmo2 training stack (includes datasets and HF Hub)..."
-uv pip install --python "${VENV_PYTHON}" -e "${MOLMO2_REPO}[train]"
-"${VENV_PYTHON}" scripts/install_requirements.py --profile molmo2 --installer uv
-
-echo "Checking CUDA and required imports..."
-"${VENV_PYTHON}" - <<'PY'
+  STEP="${PROFILE} requirements validation"
+  "$ENV_DIR/bin/python" scripts/install_requirements.py --profile "$PROFILE" --print >/dev/null
+  STEP='CUDA PyTorch and matching CPU video decoder'
+  uv pip install --python "$ENV_DIR/bin/python" torch==2.10.0 torchvision==0.25.0 \
+    --index-url "${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu130}"
+  uv pip install --python "$ENV_DIR/bin/python" --no-deps torchcodec==0.10.0 \
+    --index-url https://download.pytorch.org/whl/cpu
+  # Execute a CUDA operation before downloading the rest of the stack.
+  "$ENV_DIR/bin/python" -I - <<'PY'
 import torch
-import datasets
-import huggingface_hub
-import torchcodec
-import omegaconf
-
-print(f"PyTorch: {torch.__version__}; CUDA runtime: {torch.version.cuda}")
 if not torch.cuda.is_available():
-    raise SystemExit("CUDA is not available. Check that the Thunder Compute VM has its NVIDIA driver installed.")
-name = torch.cuda.get_device_name(0)
-memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
-print(f"GPU: {name}; VRAM: {memory:.1f} GiB")
-if "A6000" not in name:
-    print("Warning: this VM is not reporting an RTX A6000.")
-print(f"datasets: {datasets.__version__}; huggingface_hub: {huggingface_hub.__version__}")
-print(f"torchcodec: {torchcodec.__version__}; import OK")
-print(f"OmegaConf: {omegaconf.__version__} (Molmo2 schema compatibility pin)")
+    raise SystemExit('CUDA unavailable. Check the NVIDIA driver and TORCH_INDEX_URL before continuing.')
+x = torch.ones(1, device='cuda') + 1
+torch.cuda.synchronize()
+print('CUDA operation passed:', torch.cuda.get_device_name(0), 'torch', torch.__version__, flush=True)
 PY
-
-echo "Package setup complete. Run commands: docs/molmo2_training.md"
 }
 
-setup_robot() {
-git submodule update --init lerobot
-if [[ ! -x .venv/bin/python ]]; then
-  uv venv --seed --python 3.12 .venv
+install_profile() {
+  STEP="${PROFILE} dependencies and editable project"
+  "$ENV_DIR/bin/python" scripts/install_requirements.py --profile "$PROFILE" --installer uv \
+    --pin torch==2.10.0 --pin torchvision==0.25.0 --pin torchcodec==0.10.0
+}
+
+verify_environment() {
+  STEP="${PROFILE} environment verification"
+  [[ -x "$ENV_DIR/bin/python" ]] || { echo "Missing $ENV_DIR; run setup without --check first." >&2; exit 1; }
+  # -I ignores PYTHONPATH and the script directory: the installed package must work.
+  "$ENV_DIR/bin/python" -I "$ROOT/scripts/verify_setup.py" --profile "$PROFILE"
+  printf '\nSetup verified. Activate with:\nsource %s/bin/activate\n' "$ENV_DIR"
+}
+
+setup_profile() {
+  PROFILE="$1"
+  case "$PROFILE" in
+    robot) ENV_DIR="$ROOT/.venv" ;;
+    *) ENV_DIR="$ROOT/.venv-${PROFILE}" ;;
+  esac
+  if [[ "$CHECK_ONLY" == 1 ]]; then
+    verify_environment
+    return
+  fi
+  case "$PROFILE" in
+    annotation|grounded|robot) prepare_submodule lerobot ;;
+  esac
+  if [[ "$PROFILE" == grounded ]]; then prepare_submodule tapnet; fi
+  prepare_environment
+  if [[ "$PROFILE" == molmo2 ]]; then
+    STEP='Molmo2 training checkout'
+    local work="${SO101_MOLMO2_WORKDIR:-${ROOT}/molmo2_so101_run}"
+    local repo="${MOLMO2_REPO_ROOT:-${work}/molmo2}"
+    local ref="${SO101_MOLMO2_REF:-f3cb1085fbb97c4a4d7fdcadd77cf871bf37a88a}"
+    if [[ ! -f "$repo/launch_scripts/sft.py" ]]; then
+      mkdir -p "$(dirname "$repo")"
+      git clone --depth 1 https://github.com/allenai/molmo2.git "$repo"
+      git -C "$repo" fetch --depth 1 origin "$ref"
+      git -C "$repo" checkout --detach FETCH_HEAD
+    fi
+    STEP='Molmo2 training dependencies'
+    uv pip install --python "$ENV_DIR/bin/python" -e "$repo[train]" \
+      torch==2.10.0 torchvision==0.25.0 torchcodec==0.10.0
+  fi
+  SAM2_BUILD_CUDA=0 install_profile
+  if [[ "$PROFILE" == grounded ]]; then
+    STEP='TAPIR package and spaCy language model'
+    uv pip install --python "$ENV_DIR/bin/python" --no-deps -e "$ROOT/tapnet"
+    "$ENV_DIR/bin/python" -m spacy download en_core_web_sm
+  fi
+  verify_environment
+}
+
+if [[ "$PROFILE" == all ]]; then
+  for selected in grounded molmo2 robot annotation; do setup_profile "$selected"; done
+else
+  setup_profile "$PROFILE"
 fi
-.venv/bin/python scripts/install_requirements.py --profile robot --installer uv
-echo 'Package setup complete. Run commands: README.md'
-}
-
-setup_annotation() {
-git submodule update --init lerobot
-ENV_DIR="${ROOT}/.venv-annotation"
-if [[ ! -x "$ENV_DIR/bin/python" ]]; then
-  uv venv --seed --python 3.12 "$ENV_DIR"
-fi
-uv pip install --python "$ENV_DIR/bin/python" torch==2.10.0 torchvision==0.25.0 \
-  --index-url https://download.pytorch.org/whl/cu130
-"$ENV_DIR/bin/python" scripts/install_requirements.py --profile annotation --installer uv \
-  --pin torch==2.10.0 --pin torchvision==0.25.0
-uv pip install --python "$ENV_DIR/bin/python" --no-deps torchcodec==0.10.0 \
-  --index-url https://download.pytorch.org/whl/cpu
-"$ENV_DIR/bin/python" - <<'PY'
-import torch
-from transformers import Qwen2_5_VLForConditionalGeneration, Qwen3VLForConditionalGeneration
-from robot101.data.annotate import build_parser
-from robot101.data.utilities.episode_helpers import _load_lerobot
-from anthropic import Anthropic
-_load_lerobot()
-if not torch.cuda.is_available():
-    raise SystemExit('CUDA unavailable: check the VM NVIDIA driver.')
-print('Annotation environment ready on', torch.cuda.get_device_name(0))
-PY
-echo 'Next: source .venv-annotation/bin/activate && hf auth login'
-echo 'Model access and run commands: docs/episode_annotation.md'
-}
-
-case "$PROFILE" in
-  grounded) setup_grounded ;;
-  molmo2) setup_molmo2 ;;
-  robot) setup_robot ;;
-  annotation) setup_annotation ;;
-  all)
-    setup_grounded
-    setup_molmo2
-    setup_robot
-    setup_annotation
-    ;;
-esac

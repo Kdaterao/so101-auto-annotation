@@ -6,6 +6,23 @@ Tools for turning SO-101 demonstrations into segmented, captioned, and spatially
 
 Requires Python 3.12 or 3.13 and [uv](https://docs.astral.sh/uv/).
 
+For Ubuntu GPU annotation, use the isolated setup profile:
+
+```bash
+git clone --recurse-submodules https://github.com/Kdaterao/so101-auto-annotation.git
+cd so101-auto-annotation
+bash scripts/setup/linux_setup.sh --profile annotation
+source .venv-annotation/bin/activate
+```
+
+Setup installs the project and checks CUDA, video decoding, and CLI imports.
+Run `bash scripts/setup/linux_setup.sh --profile annotation --check` to check an
+existing installation. For spatial grounding, select `--profile grounded` and
+activate `.venv-grounded`. See [the single VM guide](docs/single_vm_caption_pipeline.md)
+for the full caption pipeline.
+
+For generic development and viewers:
+
 ```bash
 git clone --recurse-submodules https://github.com/Kdaterao/so101-auto-annotation.git
 cd so101-auto-annotation

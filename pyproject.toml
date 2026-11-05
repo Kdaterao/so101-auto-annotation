@@ -36,7 +36,7 @@ lerobot = { path = "lerobot", editable = true }
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["robot101*"]
-namespaces = false
+namespaces = true
 
 [tool.pytest.ini_options]
 pythonpath = ["src", "scripts"]
