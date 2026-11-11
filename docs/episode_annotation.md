@@ -40,8 +40,8 @@ unless `--push-to-hub --dst-repo-id OWNER/DATASET` is supplied.
 
 ```bash
 git submodule update --init lerobot
-bash scripts/setup/linux_setup.sh --profile annotation
-source .venv-annotation/bin/activate
+bash scripts/setup/linux_setup.sh --profile workflow
+source .venv/bin/activate
 hf auth login
 ```
 
@@ -57,8 +57,8 @@ Use a new output directory when switching models; existing run configurations
 and caption caches cannot be resumed under the new default.
 The Hugging Face account used on the VM needs approved PerceptionLM access. Model downloads
 occur on the first GPU run; package setup does not download weights or start jobs.
-The isolated environment uses Transformers 5.5.4; existing grounding pins remain
-unchanged. The first run resolves dataset/model references and the official JEPA
+The shared `.venv` uses Transformers 5.5.x for annotation and the other project
+workflows. The first run resolves dataset/model references and the official JEPA
 repository ref to immutable commits in `run.json`. Resume uses those same commits.
 The encoder checkpoint is downloaded explicitly from Meta's published
 `https://dl.fbaipublicfiles.com/vjepa2/vjepa2_1_vitl_dist_vitG_384.pt` URL;
@@ -461,13 +461,13 @@ It does **not** merge subtasks, verify video pixels, or run grounding.
 
 #### 1. Activate the environment and authenticate
 
-If you already installed the annotation environment:
+If you already installed the shared workflow environment:
 
 ```bash
-source .venv-annotation/bin/activate
+source .venv/bin/activate
 ```
 
-For first-time Linux environment setup, use the annotation installer in the setup
+For first-time Linux environment setup, use the workflow installer in the setup
 section above. Two separate credentials are used:
 
 - `HF_TOKEN` or `hf auth login`: download private source artifacts and upload results.

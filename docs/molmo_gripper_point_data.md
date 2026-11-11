@@ -4,13 +4,11 @@ This workflow samples third-person images from the SO-101 dataset and lets a
 person click one jaw-center point for each visible gripper. The resulting point labels can supervise
 Molmo gripper grounding.
 
-From the repository root, prepare a local labeling environment and sign in to
-Hugging Face:
+Use the shared project environment and sign in to Hugging Face:
 
 ```bash
-python3 -m venv .venv-labeling
-source .venv-labeling/bin/activate
-python scripts/install_requirements.py --profile labeling
+uv sync --extra workflow
+source .venv/bin/activate
 hf auth login
 ```
 

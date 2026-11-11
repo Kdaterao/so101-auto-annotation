@@ -26,7 +26,8 @@ For generic development and viewers:
 ```bash
 git clone --recurse-submodules https://github.com/Kdaterao/so101-auto-annotation.git
 cd so101-auto-annotation
-uv sync --extra dev --extra viewer
+uv sync --extra workflow --extra dev
+uv pip install --no-deps -e ./tapnet
 ```
 
 If you cloned without submodules, fetch the pinned upstream dependencies with `git submodule update --init --recursive` before syncing. Model weights and Hugging Face credentials are configured separately; see the workflow guides in `docs/`.
@@ -39,8 +40,15 @@ If you cloned without submodules, fetch the pinned upstream dependencies with `g
 - Combine datasets: `uv run python -m robot101.data.combine_datasets --help`
 - Collect gripper point labels: `uv run python -m robot101.data.collect_points --help`
 - Inspect annotation outputs: `uv run streamlit run scripts/view_episode_annotations.py`
+- Manually curate published segments: `uv run python scripts/curate_episode_annotations.py --help`
+- Propagate human-clicked POV points: `uv run python scripts/propagate_pov_points.py --help`
 
 The model pipeline uses JEPA features for temporal segmentation, vision-language models for action captions, and perception/tracking models for spatial grounding. The package's workflow guides describe model setup, data formats, caching, and staged processing.
+
+For a manual review workflow that avoids automatic POV clustering, see
+[manual curation and direct POV tracking](docs/manual_curation_and_pov_tracking.md).
+The curation app is separate from the read-only annotation viewer. Segmentation,
+curation, viewing, and direct POV tracking all use the same `.venv`.
 
 ## Data
 

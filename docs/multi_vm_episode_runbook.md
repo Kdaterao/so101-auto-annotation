@@ -4,8 +4,8 @@ Run annotation, grounding, then Claude aggregation for each VM's assigned episod
 Ranges have **inclusive endpoints**. This batch contains **73 episodes**;
 episodes **3–5 are already computed** and are not rerun here.
 
-Use one GPU job at a time on each VM. Annotation and grounding use different
-Python environments. Claude aggregation uses the annotation environment and an API key.
+Use one GPU job at a time on each VM. Annotation, grounding, and aggregation use
+the same `.venv` environment and an API key for Claude.
 Each worker publishes to separate repositories; these commands do not merge the
 four grounded LeRobot datasets into one destination.
 
@@ -17,9 +17,8 @@ on **each VM**:
 ```bash
 git clone https://github.com/Kdaterao/robot101.git
 cd robot101
-bash scripts/setup/linux_setup.sh --profile annotation
-bash scripts/setup/linux_setup.sh --profile grounded
-source .venv-annotation/bin/activate
+bash scripts/setup/linux_setup.sh --profile workflow
+source .venv/bin/activate
 hf auth login
 mkdir -p tapnet/checkpoints
 curl --fail --location \
@@ -85,7 +84,7 @@ releases. Use a different `RUN_TAG` if intentionally changing processing setting
 ## 3. Annotate — run on all four VMs
 
 ```bash
-source .venv-annotation/bin/activate
+source .venv/bin/activate
 python -m robot101.data.annotate \
   --src-repo-id felsager/community_dataset_v3_ee_smolVLA \
   --src-revision "$SOURCE_REVISION" \
@@ -111,7 +110,7 @@ batch sizes and use a fresh run tag/output configuration as required by caching.
 Run on each GPU VM after its annotation output is ready. Claude is not required:
 
 ```bash
-source .venv-grounded/bin/activate
+source .venv/bin/activate
 python -m robot101.data.preprocess \
   --annotation-repo-ids "$ANNOTATION_REPO" \
   --annotation-stage captioning --annotation-text caption \
@@ -150,7 +149,7 @@ echo
 ```
 
 ```bash
-source .venv-annotation/bin/activate
+source .venv/bin/activate
 python -m robot101.data.aggregate_annotations \
   --input-dir "$ANNOTATION_DIR" \
   --episodes "$EPISODES" \

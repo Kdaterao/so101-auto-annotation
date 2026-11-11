@@ -120,7 +120,7 @@ Hugging Face, and download the TAPIR checkpoint once:
 
 ```bash
 bash scripts/setup/linux_setup.sh
-source .venv-grounded/bin/activate
+source .venv/bin/activate
 hf auth login
 mkdir -p tapnet/checkpoints
 curl -L https://storage.googleapis.com/dm-tapnet/bootstap/causal_bootstapir_checkpoint.pt \
@@ -219,7 +219,7 @@ positive-only mask when no negatives are returned, weakening this safeguard.
 Correct queued masks on your laptop with:
 
 ```bash
-.venv-viewer/bin/python scripts/fix_gripper_masks.py \
+.venv/bin/python scripts/fix_gripper_masks.py \
   --review-dir /path/to/point_tracks/mask_review
 ```
 

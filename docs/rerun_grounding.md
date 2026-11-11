@@ -21,8 +21,8 @@ cd ~
 git clone https://github.com/Kdaterao/robot101.git
 cd ~/robot101
 nvidia-smi
-bash scripts/setup/linux_setup.sh --profile grounded
-source .venv-grounded/bin/activate
+bash scripts/setup/linux_setup.sh --profile workflow
+source .venv/bin/activate
 hf auth login
 hf auth whoami
 mkdir -p tapnet/checkpoints
@@ -56,7 +56,7 @@ After setup, start a persistent terminal **before** setting worker variables:
 ```bash
 tmux new -s grounding
 cd ~/robot101
-source .venv-grounded/bin/activate
+source .venv/bin/activate
 ```
 
 Then continue with the worker block below and run inside tmux. Detach with
@@ -217,7 +217,7 @@ space for another assembled bundle. Do not include both old and new grounding fo
 the same episode, and do not pass the old unified repo as an ordinary worker repo.
 
 ```bash
-source .venv-viewer/bin/activate
+source .venv/bin/activate
 python -m robot101.data.combine_datasets \
   --base-manifest outputs/so101_spread73_v1_unified/manifest.json \
   --replace-repo kdaterao/so101_spread73_v1_grounded_vm1=kdaterao/so101_spread73_v3_grounded_vm1 \
@@ -246,7 +246,7 @@ the pinned source repos on demand. A lightweight bundle is not a complete media 
 ## 6. View, then optionally upload
 
 ```bash
-.venv-viewer/bin/python -m streamlit run scripts/view_combined_dataset.py -- \
+.venv/bin/python -m streamlit run scripts/view_combined_dataset.py -- \
   --root outputs/so101_spread73_v3_unified
 ```
 

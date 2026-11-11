@@ -5,9 +5,9 @@
 From the repository root:
 
 ```bash
-python3 -m venv .venv-viewer
-source .venv-viewer/bin/activate
-python scripts/install_requirements.py --profile viewer
+uv sync --extra workflow
+uv pip install --no-deps -e ./tapnet
+source .venv/bin/activate
 ```
 
 ## View random episodes and subtasks

@@ -4,8 +4,8 @@
 
 ```bash
 cd ~/robot101
-bash scripts/setup/linux_setup.sh
-source .venv-grounded/bin/activate
+bash scripts/setup/linux_setup.sh --profile workflow
+source .venv/bin/activate
 hf auth login
 ```
 

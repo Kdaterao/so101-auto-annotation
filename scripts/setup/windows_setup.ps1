@@ -1,4 +1,4 @@
-# Windows environment setup for TAPIR with CUDA PyTorch.
+# Windows shared workflow environment with CUDA PyTorch and TAPIR.
 #
 #   powershell -ExecutionPolicy Bypass -File scripts/setup/windows_setup.ps1
 #   .\.venv\Scripts\Activate.ps1
@@ -20,26 +20,29 @@ if (-not (Test-Path .venv)) {
 }
 .\.venv\Scripts\Activate.ps1
 
-Write-Host "==> ensuring tapnet git submodule"
-git submodule update --init --recursive tapnet
+Write-Host "==> ensuring LeRobot and tapnet submodules"
+git submodule update --init --recursive lerobot tapnet
 if (-not (Test-Path "tapnet\tapnet")) {
     throw "tapnet submodule missing. Run: git submodule update --init --recursive tapnet"
 }
 
+# Install the same single workflow environment used for segmentation, curation,
+# viewing, and direct point propagation.
+Write-Host "==> installing shared workflow dependencies"
+$VenvPython = (Resolve-Path ".venv\Scripts\python.exe").Path
+uv pip install --python $VenvPython -e ".[workflow,dev]"
+
 # Install tapnet WITHOUT pulling a CPU torch from PyPI.
 Write-Host "==> installing local tapnet (editable, --no-deps)"
-uv pip install -e .\tapnet --no-deps
-
-Write-Host "==> installing TAPIR requirements"
-python scripts/install_requirements.py --profile tapnet --installer uv
+uv pip install --python $VenvPython -e .\tapnet --no-deps
 
 # CUDA torch LAST so nothing overwrites it with +cpu.
 Write-Host "==> installing PyTorch CUDA 12.4 (force reinstall)"
-uv pip uninstall torch torchvision torchaudio 2>$null
-uv pip install --reinstall torch torchvision --index-url https://download.pytorch.org/whl/cu124
+uv pip uninstall --python $VenvPython torch torchvision torchaudio 2>$null
+uv pip install --python $VenvPython --reinstall torch torchvision --index-url https://download.pytorch.org/whl/cu124
 
 Write-Host "==> GPU sanity check"
-python -c @"
+& $VenvPython -c @"
 import torch
 print('torch', torch.__version__, 'cuda', torch.cuda.is_available())
 if not torch.cuda.is_available():
@@ -53,4 +56,4 @@ import einops
 print('TAPIR dependencies OK')
 "@
 
-Write-Host "Package setup complete. Run commands: docs/legacy/TAPNET_COMMANDS.md"
+Write-Host "Package setup complete. Run commands: README.md and docs/manual_curation_and_pov_tracking.md"

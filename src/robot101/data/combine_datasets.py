@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 
 from robot101.data.utilities.annotation_tree import atomic_json, fingerprint
+from robot101.data.utilities.curation import fingerprint as curation_fingerprint
 
 
 def rate_limit_delay(exc, minimum):
@@ -97,8 +98,24 @@ def collect(roots):
                 raise ValueError(f"Duplicate grounding episode {key}")
             item["grounding"] = (record, f"{prefix}/{path.relative_to(root).as_posix()}")
             item["grounding_dataset"] = f"{prefix}"
+        for path in sorted((root / "curation" / "episodes").glob("ep*.json")):
+            record = json.loads(path.read_text())
+            key = identity(record)
+            item = episodes.setdefault(key, {})
+            if "curation" in item:
+                raise ValueError(f"Duplicate manual curation episode {key}")
+            item["curation"] = (record, f"{prefix}/{path.relative_to(root).as_posix()}")
+            item["curation_dataset"] = f"{prefix}"
+        for path in sorted((root / "pov_tracks" / "episodes").glob("ep*.json")):
+            record = json.loads(path.read_text())
+            key = identity(record)
+            item = episodes.setdefault(key, {})
+            if "manual_pov" in item:
+                raise ValueError(f"Duplicate manual POV track episode {key}")
+            item["manual_pov"] = (record, f"{prefix}/{path.relative_to(root).as_posix()}")
+            item["manual_pov_dataset"] = f"{prefix}"
     if not episodes:
-        raise ValueError("No captioning, aggregation or point_tracks episode artifacts found")
+        raise ValueError("No captioning, aggregation, grounding, curation or POV point artifacts found")
     return episodes
 
 
@@ -106,6 +123,7 @@ def join(episodes):
     rows, reviews = [], []
     for key, item in sorted(episodes.items()):
         trees = [item[s][0] for s in ("captioning", "aggregation") if s in item]
+        curation = item.get("curation", (None, None))[0]
         ground = item.get("grounding", (None, None))[0]
         if trees:
             base = trees[0]
@@ -137,6 +155,36 @@ def join(episodes):
                         raise ValueError(f"Changed node bounds in {key}: {n['id']}")
         else:
             nodes = {}
+        if curation:
+            if not trees:
+                raise ValueError(f"Manual curation for {key} has no matching segmentation sidecar")
+            from robot101.data.utilities.curation import validate_curation
+            validate_curation(curation, base)
+            for node_id, manual in curation["segments"].items():
+                if node_id not in nodes:
+                    raise ValueError(f"Curated node outside selected cut: {key}/{node_id}")
+                nodes[node_id] = dict(nodes[node_id])
+                nodes[node_id]["start_frame"] = manual["start_frame"]
+                nodes[node_id]["end_frame"] = manual["end_frame"]
+                nodes[node_id]["manual_annotation"] = manual
+            cursor = 0
+            for node in sorted(nodes.values(), key=lambda value: value["start_frame"]):
+                if node["start_frame"] != cursor or node["end_frame"] <= cursor:
+                    raise ValueError(f"Gaps or overlaps in curated cut for {key}")
+                cursor = node["end_frame"]
+            if cursor != curation["n_frames"]:
+                raise ValueError(f"Incomplete curated cut for {key}")
+        manual_pov = item.get("manual_pov", (None, None))[0]
+        manual_pov_path = item.get("manual_pov", (None, None))[1]
+        manual_points = {}
+        manual_pov_stale = bool(manual_pov and curation and
+                                manual_pov.get("curation_fingerprint") != curation_fingerprint(curation))
+        if manual_pov:
+            if (manual_pov.get("source_repo_id"), manual_pov.get("source_revision")) != key[:2]:
+                raise ValueError(f"Manual POV point source identity differs for {key}")
+            if not manual_pov_stale:
+                for point in manual_pov.get("points", []):
+                    manual_points.setdefault(point.get("node_id"), []).append(point)
         grounding = {}
         for stage in ground["subtasks"] if ground else []:
             annotation = stage.get("annotation")
@@ -169,35 +217,66 @@ def join(episodes):
                 raise ValueError(f"Grounding does not cover parent interval: {key}/{node_id}")
             stage = (segments[0] if len(segments) == 1 else
                      dict(interval_role="grounding_only_group", segments=segments)) if segments else None
+            manual_annotation = node.get("manual_annotation")
+            manual_stage = None
+            if manual_annotation or node_id in manual_points:
+                tracks_file = (f"{Path(manual_pov_path).parent}/{manual_pov.get('tracks_file')}"
+                               if manual_pov and manual_pov.get("tracks_file") else None)
+                manual_stage = dict(
+                    method="manual_seed_bidirectional_bootstapir",
+                    camera=manual_pov.get("camera", "wrist") if manual_pov else "wrist",
+                    metadata_path=manual_pov_path, tracks_file=None if manual_pov_stale else tracks_file,
+                    status="stale" if manual_pov_stale else (manual_pov.get("status") if manual_pov else "pending"),
+                    points=manual_points.get(node_id, []))
             state = aggregated.get(node_id, {})
             annotation = state.get("annotation", {}) if state.get("status") == "ok" else {}
             reasons = []
-            if node.get("caption", {}).get("status") != "ok":
-                reasons.append("missing_or_failed_caption")
-            if state.get("status") != "ok":
-                reasons.append("missing_or_failed_aggregation")
-            elif annotation.get("robotics", {}).get("review_status") != "accepted":
-                reasons.append("aggregation_requires_review")
-            if not stage:
-                reasons.append("missing_grounding")
-            elif any(s.get("pov", {}).get("status") != "ok"
-                  or s.get("pov", {}).get("gripper_filter", {}).get("manual_review_required")
-                  or not s.get("third_person")
-                  or any(v.get("status") != "ok" for v in s.get("third_person", {}).values()) for s in segments):
-                reasons.append("grounding_requires_review")
+            if manual_annotation:
+                if curation["episode_review_status"] != "accepted" or manual_annotation["review_status"] != "accepted":
+                    reasons.append("manual_curation_requires_review")
+                if not str(manual_annotation.get("text", "")).strip():
+                    reasons.append("missing_manual_annotation_text")
+                tracks_for_node = manual_points.get(node_id, [])
+                if not tracks_for_node:
+                    reasons.append("missing_manual_pov_points")
+                elif any(point.get("status") != "ok" for point in tracks_for_node):
+                    reasons.append("manual_pov_tracking_requires_review")
+                if manual_pov and manual_pov.get("status") != "ok":
+                    reasons.append("manual_pov_tracking_requires_review")
+                if manual_pov_stale:
+                    reasons.append("manual_pov_tracks_stale_after_curation_edit")
+            else:
+                if node.get("caption", {}).get("status") != "ok":
+                    reasons.append("missing_or_failed_caption")
+                if state.get("status") != "ok":
+                    reasons.append("missing_or_failed_aggregation")
+                elif annotation.get("robotics", {}).get("review_status") != "accepted":
+                    reasons.append("aggregation_requires_review")
+                if not stage:
+                    reasons.append("missing_grounding")
+                elif any(s.get("pov", {}).get("status") != "ok"
+                      or s.get("pov", {}).get("gripper_filter", {}).get("manual_review_required")
+                      or not s.get("third_person")
+                      or any(v.get("status") != "ok" for v in s.get("third_person", {}).values()) for s in segments):
+                    reasons.append("grounding_requires_review")
+            caption_text = manual_annotation.get("text") if manual_annotation else node.get("caption", {}).get("text")
+            action_text = manual_annotation.get("text") if manual_annotation else annotation.get("brief_action")
             row = dict(source_repo_id=key[0], source_revision=key[1], episode_index=key[2],
                        node_id=node_id, start_frame=node["start_frame"], end_frame=node["end_frame"],
-                       bounds="half_open_source_frames", caption=node.get("caption", {}).get("text"),
-                       brief_action=annotation.get("brief_action"), detailed_action=annotation.get("detailed_action"),
+                       bounds="half_open_source_frames", caption=caption_text,
+                       brief_action=action_text,
+                       detailed_action=manual_annotation.get("text") if manual_annotation else annotation.get("detailed_action"),
                        actor=annotation.get("actor"),
                        brief_caption=annotation.get("brief_caption"), detailed_caption=annotation.get("detailed_caption"),
-                       annotation_json=json.dumps(annotation),
-                       grounding_json=json.dumps(stage) if stage else None,
+                       annotation_json=json.dumps({"manual_annotation": manual_annotation} if manual_annotation else annotation),
+                       grounding_json=json.dumps(manual_stage or stage) if (manual_stage or stage) else None,
                        grounding_dataset_path=item.get("grounding_dataset"),
                        grounding_destination_episode=ground.get("destination_episode") if ground else None,
                        captioning_path=item.get("captioning", (None, None))[1],
                        aggregation_path=item.get("aggregation", (None, None))[1],
                        grounding_path=item.get("grounding", (None, None))[1],
+                       curation_path=item.get("curation", (None, None))[1],
+                       manual_pov_path=manual_pov_path,
                        review_required=bool(reasons), review_reasons=reasons)
             rows.append(row)
             if reasons:
@@ -283,7 +362,9 @@ def main():
         snapshot = Path(hub(lambda: snapshot_download(
             source["repo_id"], repo_type="dataset", revision=source["revision"],
             allow_patterns=(["captioning/episodes/ep*.json", "aggregation/episodes/ep*.json",
-                             "point_tracks/ep*.json", "meta/info.json", "meta/episodes/**/*.parquet"]
+                             "point_tracks/ep*.json", "curation/episodes/ep*.json",
+                             "pov_tracks/episodes/ep*.json", "pov_tracks/episodes/ep*.npz",
+                             "meta/info.json", "meta/episodes/**/*.parquet"]
                             if args.lightweight else None),
             max_workers=args.download_workers), f"download {source['repo_id']}"))
         roots.append((snapshot, source["path"]))
@@ -294,7 +375,9 @@ def main():
         if args.lightweight:
             import fnmatch
             patterns = ["captioning/episodes/ep*.json", "aggregation/episodes/ep*.json",
-                        "point_tracks/ep*.json", "meta/info.json", "meta/episodes/**/*.parquet"]
+                        "point_tracks/ep*.json", "curation/episodes/ep*.json",
+                        "pov_tracks/episodes/ep*.json", "pov_tracks/episodes/ep*.npz",
+                        "meta/info.json", "meta/episodes/**/*.parquet"]
             for path in snapshot.rglob("*"):
                 relative = path.relative_to(snapshot).as_posix()
                 if path.is_file() and any(fnmatch.fnmatch(relative, pattern) for pattern in patterns):
@@ -320,7 +403,7 @@ configs:
 ---
 # Unified robot episode artifacts
 
-Joined caption, Claude annotation and grounding records. Frame bounds are half-open.
+Joined segmentation, caption, human curation, and grounding records. Frame bounds are half-open.
 `artifacts/` preserves complete input snapshots, including worker videos, actions,
 masks and provenance. Paths in each input's sidecars remain relative to that input.
 `manifest.json` pins every input revision. Missing/failed stages remain in review.json.
@@ -329,7 +412,9 @@ The train split is not a held-out split or quality certification.
 This is a unified indexed bundle, not one reindexed LeRobot dataset. Each grounded
 worker remains loadable at its `grounding_dataset_path`, using that worker's local
 `grounding_destination_episode`. Join training labels by source identity/node ID.
-Videos and stored frame task strings are not rewritten. See each input's license.
+Manual POV tracks are stored in compressed NPZ sidecars referenced from
+`grounding_json`; manual annotations replace the caption/action text for curated
+segments. Videos and stored frame task strings are not rewritten. See each input's license.
 """
     if args.lightweight:
         card += ("\n## Lightweight test bundle\n\nVideos, masks and inspection images are referenced, not copied. "

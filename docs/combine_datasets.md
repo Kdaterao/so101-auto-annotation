@@ -10,7 +10,7 @@ used. This downloads and copies the complete input datasets, including videos;
 allow disk space for both the Hub cache and the assembled output.
 
 ```bash
-source .venv-viewer/bin/activate
+source .venv/bin/activate
 
 REPOS=()
 for WORKER in 1 2 3 4; do
@@ -42,7 +42,7 @@ Build a small worker-2 test from the published datasets, skipping image/video
 bulk downloads. Use a fresh directory separate from the full download:
 
 ```bash
-.venv-viewer/bin/python -m robot101.data.combine_datasets \
+.venv/bin/python -m robot101.data.combine_datasets \
   --repos kdaterao/so101_spread73_v1_annotations_vm2 \
           kdaterao/so101_spread73_v1_aggregated_vm2 \
           kdaterao/so101_spread73_v1_grounded_vm2 \
@@ -110,8 +110,8 @@ original artifacts; the combiner does not assign a replacement license.
 ## Streamlit viewer
 
 ```bash
-.venv-viewer/bin/python scripts/install_requirements.py --profile viewer
-.venv-viewer/bin/python -m streamlit run scripts/view_combined_dataset.py
+uv sync --extra workflow
+.venv/bin/python -m streamlit run scripts/view_combined_dataset.py
 ```
 
 The page contains only a **Source episode** selector, one final annotation above
@@ -136,16 +136,16 @@ The default uses `outputs/so101_spread73_v1_unified` if it contains
 Choose another source through launch arguments, without adding controls to the page:
 
 ```bash
-.venv-viewer/bin/python -m streamlit run scripts/view_combined_dataset.py -- \
+.venv/bin/python -m streamlit run scripts/view_combined_dataset.py -- \
   --root outputs/so101_unified_test_vm2
 ```
 
 ```bash
-.venv-viewer/bin/python -m streamlit run scripts/view_combined_dataset.py -- \
+.venv/bin/python -m streamlit run scripts/view_combined_dataset.py -- \
   --repo-id kdaterao/so101_spread73_v1_unified
 ```
 
 Optional `--revision SHA` pins the Hub input. For private repositories use
-`hf auth login` in the viewer environment. Autoplay is muted and browsers may
+`hf auth login` in the shared workflow environment. Autoplay is muted and browsers may
 require clicking Play. Missing videos/captions are reported without fabricated
 replacements. Restart Streamlit to reload a modified local dataset immediately.
